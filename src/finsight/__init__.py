@@ -1,3 +1,5 @@
-"""Finsight — production-grade financial research agent."""
+"""Finsight — a local financial research proof of concept."""
 
-__version__ = "0.1.0"
+from importlib.metadata import version
+
+__version__ = version("finsight")
