@@ -23,6 +23,9 @@ indexes require rebuilding with `finsight ingest`.
 Retrieval combines dense vector ranks with BM25 ranks using reciprocal-rank
 fusion. Documents without lexical matches do not receive a sparse-rank bonus.
 Original component scores remain attached to results for inspection.
+When the ASCII sparse tokenizer finds no terms in the entire corpus, retrieval
+uses dense vectors alone. Mixed corpora still use BM25 for chunks with matching
+ASCII terms, without giving tokenless chunks a sparse-rank bonus.
 
 ## Agent graph and evidence
 
@@ -55,14 +58,23 @@ The graph uses the shared MCP tool functions in-process by default. External
 clients can use the same tools through stdio or HTTP. The included stdio client
 explicitly forwards Finsight settings and supported provider credentials. Tool
 failures raise `MCPToolError`, rather than masquerading as successful text.
+Finsight environment names are forwarded case-insensitively, matching Settings.
+`doctor` checks local answering and embedding endpoints independently, reports
+HTTP failures, and labels hosted providers as unprobed rather than claiming they
+are healthy without an authenticated request.
 
 ## Evaluation and validation
 
 Golden-set evaluation measures retrieval recall, reciprocal rank, document-level
 nDCG, citation validity, and model-judged faithfulness/correctness. Repeated chunks
 from one relevant document receive relevance credit only once in nDCG. The judge
-sees the same bounded evidence used for the answer. Negative cases are scored for
-abstention. These small golden sets demonstrate behavior, not statistical quality.
+sees the same bounded evidence used for the answer. Negative cases receive a typed
+judge verdict checking both refusal and the absence of a substantive or guessed
+answer. Empty answers fail; malformed verdicts remain unscored. The summary shows
+the eligible, scored, and error counts alongside the abstention rate, so exclusions
+are visible. The legacy phrase-match helper is not used for headline metrics.
+These small golden sets demonstrate behavior, not statistical quality; the judge
+can still make mistakes even when its output satisfies the schema.
 
 Regression tests exercise graph branches, context budgets, citation mappings,
 interrupted index publication, embedding dimension changes, live retriever reload,

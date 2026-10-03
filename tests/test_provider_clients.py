@@ -1,6 +1,7 @@
 """Offline regression coverage for provider construction and stdio contracts."""
 
 import builtins
+import os
 
 import pytest
 
@@ -47,16 +48,27 @@ def test_mcp_subprocess_forwards_only_application_and_provider_settings(monkeypa
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic")
     monkeypatch.setenv("UNRELATED_SECRET", "do-not-forward")
+    monkeypatch.setenv("unrelated_secret", "do-not-forward")
+    monkeypatch.setenv("FinSight_Embed_Timeout_S", "2.5")
     env = _server_params().env
     assert env["FINSIGHT_LLM_BASE_URL"] == "http://local:8000"
     assert env["OPENAI_API_KEY"] == "test-openai"
     assert env["ANTHROPIC_API_KEY"] == "test-anthropic"
+    assert env["FinSight_Embed_Timeout_S"] == "2.5"
     assert "UNRELATED_SECRET" not in env
+    assert "unrelated_secret" not in env
 
 
-def test_stdio_uses_configured_corpus_and_reports_tool_errors(monkeypatch, tmp_path):
+@pytest.mark.parametrize("setting_name", ["FINSIGHT_CORPUS_DIR", "finsight_corpus_dir",
+                                          "FinSight_Corpus_Dir"])
+def test_stdio_uses_configured_corpus_and_reports_tool_errors(
+    monkeypatch, tmp_path, setting_name,
+):
     (tmp_path / "unique.md").write_text("# Unique corpus\n\nOnly this document.")
-    monkeypatch.setenv("FINSIGHT_CORPUS_DIR", str(tmp_path))
+    for name in list(os.environ):
+        if name.lower() == "finsight_corpus_dir":
+            monkeypatch.delenv(name)
+    monkeypatch.setenv(setting_name, str(tmp_path))
     documents = call_tool("list_documents")
     assert [document["doc_id"] for document in documents] == ["unique"]
     with pytest.raises(MCPToolError, match="Unknown document") as error:

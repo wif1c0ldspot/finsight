@@ -126,3 +126,32 @@ def test_oversized_paragraph_and_overlap_stay_bounded():
 def test_invalid_chunking_settings_fail_fast(size, overlap):
     with pytest.raises(ValueError, match="chunk_size"):
         ingest._split_text("text", size, overlap)
+
+
+@pytest.mark.parametrize("text,query", [("公司利润增长", "利润"), ("!!! ??? ...", "!!!")])
+def test_empty_sparse_vocabulary_uses_dense_retrieval(indexed, text, query):
+    settings, embeddings = indexed
+    (settings.corpus_dir / "a.md").write_text(text, encoding="utf-8")
+    ingest.build_index(settings)
+
+    retriever = HybridRetriever(settings, embeddings=embeddings)
+    results = retriever.retrieve(query)
+    assert [result.chunk.text for result in results] == [text]
+    assert results[0].component_scores == {"vector": 1.0}
+    # Even a tokenizable query cannot find sparse evidence in this corpus.
+    assert retriever._bm25_search("financial", 4) == []
+
+
+def test_mixed_sparse_vocabulary_preserves_matching_chunks(indexed):
+    settings, embeddings = indexed
+    (settings.corpus_dir / "a.md").write_text("公司利润增长", encoding="utf-8")
+    (settings.corpus_dir / "b.md").write_text("financial earnings", encoding="utf-8")
+    ingest.build_index(settings)
+
+    retriever = HybridRetriever(settings, embeddings=embeddings)
+    results = retriever.retrieve("financial")
+    assert [result.chunk.doc_id for result in results] == ["b", "a"]
+    assert "bm25" in results[0].component_scores
+    assert results[1].component_scores == {"vector": 1.0}
+    assert retriever._bm25_search("absenttoken", 4) == []
+    assert retriever._bm25_search("利润", 4) == []

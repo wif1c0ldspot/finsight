@@ -6,6 +6,9 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # Data artifacts (rebuilt via `finsight ingest`)
 data/chroma/
