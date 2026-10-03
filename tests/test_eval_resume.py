@@ -264,3 +264,50 @@ def test_cli_resume_refusal_has_safe_actionable_reason(tmp_path, monkeypatch):
     assert "Resume refused" in command.output
     assert "configuration" in command.output
     assert "changed-secret-model-name" not in command.output
+
+
+def test_resume_rejects_real_index_collection_mismatch_before_model_work(tmp_path, monkeypatch):
+    from langchain_core.embeddings import Embeddings
+
+    from finsight.eval.compare import compare_reports
+    from finsight.rag.index import IndexIntegrityError
+    from finsight.rag.ingest import build_index
+    from finsight.rag.retrieve import HybridRetriever
+
+    class FakeEmbeddings(Embeddings):
+        def embed_documents(self, texts):
+            return [[1.0, 2.0, 3.0] for _ in texts]
+
+        def embed_query(self, text):
+            return [1.0, 2.0, 3.0]
+
+    settings, output = fixture(tmp_path)
+    settings.corpus_dir = tmp_path / "corpus"
+    settings.chroma_dir = tmp_path / "chroma"
+    settings.corpus_dir.mkdir()
+    (settings.corpus_dir / "source.md").write_text("# Source\n\nA local test document.")
+    embeddings = FakeEmbeddings()
+    monkeypatch.setattr("finsight.rag.ingest.build_embeddings", lambda _: embeddings)
+    build_index(settings)
+    harness.run_eval(settings, output=output, agent=Agent([{"answer": ""}] * 3), judge=Judge())
+    original = output.read_bytes()
+    settings.collection_name = "different-logical-collection"
+    with pytest.raises(IndexIntegrityError):
+        HybridRetriever(settings, embeddings=embeddings)
+
+    constructors = []
+    monkeypatch.setattr(harness, "build_agent", lambda _: constructors.append("agent"))
+    monkeypatch.setattr(harness, "build_judge", lambda _: constructors.append("judge"))
+    with pytest.raises(harness.EvaluationCheckpointError, match="configuration"):
+        harness.run_eval(settings, resume=output)
+    assert constructors == []
+    assert output.read_bytes() == original
+
+    # Comparisons label this now-allowlisted setting instead of hiding the change.
+    candidate = tmp_path / "candidate.json"
+    report = json.loads(original)
+    for phase in ("before", "after"):
+        report["provenance"][phase]["configuration"]["collection_name"] = settings.collection_name
+    candidate.write_text(json.dumps(report))
+    change = compare_reports(output, candidate)["configuration_changes"]["collection_name"]
+    assert change == {"baseline": "finsight", "candidate": "different-logical-collection"}

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlsplit, urlunsplit
 
 import typer
 from rich.console import Console
@@ -89,14 +90,30 @@ def _fail(exc: Exception) -> None:
     raise typer.Exit(code=1) from exc
 
 
+def _endpoint_for_display(value: str | None) -> str:
+    """Keep endpoint diagnostics useful without exposing URL auth/query secrets."""
+    if value is None:
+        return "not configured"
+    try:
+        parts = urlsplit(value)
+        if not parts.scheme or not parts.netloc:
+            return "invalid URL"
+        return urlunsplit(parts._replace(
+            netloc=parts.netloc.rsplit("@", 1)[-1],
+            query="<redacted>" if parts.query else "", fragment="",
+        ))
+    except ValueError:
+        return "invalid URL"
+
+
 def _describe(settings: Settings) -> Table:
     table = Table(title="finsight configuration", show_header=False)
     table.add_column("Setting")
     table.add_column("Value")
     table.add_row("llm", f"{settings.llm_provider} / {settings.llm_model}")
-    table.add_row("llm base url", str(settings.resolved_llm_base_url()))
+    table.add_row("llm base url", _endpoint_for_display(settings.resolved_llm_base_url()))
     table.add_row("embeddings", f"{settings.embed_provider} / {settings.embed_model}")
-    table.add_row("embed base url", str(settings.resolved_embed_base_url()))
+    table.add_row("embed base url", _endpoint_for_display(settings.resolved_embed_base_url()))
     table.add_row(
         "judge",
         (
@@ -167,7 +184,7 @@ def doctor() -> None:
                 status = f"failed (HTTP {response.status_code})"
             checks.add_row(label, status)
         except (httpx.RequestError, httpx.InvalidURL) as exc:
-            checks.add_row(label, f"unreachable: {exc}")
+            checks.add_row(label, f"unreachable ({type(exc).__name__})")
 
     console.print(checks)
 

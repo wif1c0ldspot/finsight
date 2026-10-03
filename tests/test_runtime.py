@@ -403,3 +403,96 @@ def test_provider_usage_remains_authoritative_for_tool_responses():
         "id": "call-1", "name": "Schema", "args": {"rationale": "x" * 1000},
     }], usage_metadata={"input_tokens": 1, "output_tokens": 3, "total_tokens": 4}), 1)
     assert context.output_budget_tokens == 3
+
+
+@pytest.mark.parametrize("supplied_limits", [RunLimits(), RunLimits(max_model_calls=10)])
+def test_custom_context_cannot_disable_or_relax_configured_model_cap(supplied_limits):
+    model = Model()
+    wrapped = BudgetedModel(cast(Any, model))
+    graph = Graph(lambda state: {"answers": [wrapped.invoke("x"), wrapped.invoke("x")]})
+    configured = RunLimits.from_settings(Settings(run_max_model_calls=1))
+    context = RunContext(supplied_limits, token_counter=lambda _: 1)
+    with pytest.raises(RunLimitError, match="model_call_budget_exceeded"):
+        AgentRunner(graph, configured).invoke({}, runtime=context)
+    assert model.calls == 1
+    assert context.limits.max_model_calls == 1
+    assert context.token_counter("text") == 1
+
+
+def test_custom_context_inherits_deadline_and_keeps_its_clock():
+    now = [0.0]
+    context = RunContext(clock=lambda: now[0])
+
+    class Delayed(Model):
+        def invoke(self, prompt):
+            now[0] += 2
+            return super().invoke(prompt)
+
+    model = Delayed()
+    with pytest.raises(RunLimitError, match="deadline_exceeded"):
+        runner_for(model, RunLimits(timeout_s=1)).invoke({"question": "x"}, runtime=context)
+    assert model.calls == 1
+    assert context.summary()["elapsed_ms"] == 2000
+    assert context.limits.timeout_s == 1
+
+
+@pytest.mark.parametrize("limits,expected_calls", [
+    (RunLimits(max_input_tokens=2), 0),
+    (RunLimits(max_output_tokens=2), 1),
+    (RunLimits(max_output_tokens_per_call=2), 1),
+])
+def test_cancellation_context_inherits_configured_token_controls(limits, expected_calls):
+    model = Model(response="long output")
+    context = RunContext()
+    with pytest.raises(RunLimitError, match="token_budget_exceeded"):
+        runner_for(model, limits).invoke({"question": "long question"}, runtime=context)
+    assert model.calls == expected_calls
+    assert context.cancellation.is_set() is False
+
+
+def test_custom_counter_inherits_cost_budget_and_configured_rates():
+    context = RunContext(token_counter=lambda _: 4)
+    model = Model()
+    limits = RunLimits(max_cost_usd=3, input_cost_per_million=1_000_000,
+                       output_cost_per_million=1_000_000)
+    with pytest.raises(RunLimitError, match="cost_budget_exceeded"):
+        runner_for(model, limits).invoke({"question": "x"}, runtime=context)
+    assert model.calls == 0
+    assert context.limits == limits
+
+
+@pytest.mark.parametrize("name", ["input_cost_per_million", "output_cost_per_million"])
+def test_context_cannot_reprice_configured_cost_accounting(name):
+    model = Model()
+    context = RunContext(RunLimits(**{name: 0}))
+    runner = runner_for(model, RunLimits(max_cost_usd=3, input_cost_per_million=2,
+                                         output_cost_per_million=4))
+    with pytest.raises(ValueError, match="must match the configured cost rate"):
+        runner.invoke({"question": "x"}, runtime=context)
+    assert model.calls == 0
+    assert not context._claimed
+    assert current_run() is None
+
+
+def test_stricter_context_limits_are_honored_without_changing_runner_defaults():
+    model = Model()
+    wrapped = BudgetedModel(cast(Any, model))
+    graph = Graph(lambda state: {"answers": [wrapped.invoke("x"), wrapped.invoke("x")]})
+    runner = AgentRunner(graph, RunLimits(max_model_calls=2))
+    context = RunContext(RunLimits(max_model_calls=1))
+    with pytest.raises(RunLimitError, match="model_call_budget_exceeded"):
+        runner.invoke({}, runtime=context)
+    assert model.calls == 1
+    assert runner.invoke({})["runtime"]["model_calls"] == 2
+    assert runner.limits.max_model_calls == 2
+
+
+def test_async_context_inherits_configured_model_budget():
+    model = Model()
+    wrapped = BudgetedModel(cast(Any, model))
+    graph = Graph(lambda state: {"answers": [wrapped.invoke("x"), wrapped.invoke("x")]})
+    with pytest.raises(RunLimitError, match="model_call_budget_exceeded"):
+        asyncio.run(AgentRunner(graph, RunLimits(max_model_calls=1)).ainvoke(
+            {}, runtime=RunContext(),
+        ))
+    assert model.calls == 1

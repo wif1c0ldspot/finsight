@@ -98,7 +98,9 @@ PII output redaction is also heuristic and preserves unlabelled financial amount
 ## Runtime and provider boundaries
 
 `AgentRunner` creates fresh accounting for each invocation. `RunContext` supports
-explicit cancellation and an injectable content counter. Node and logical model
+explicit cancellation and an injectable content counter. Supplied contexts inherit
+configured limits and may tighten them; conflicting cost rates are rejected before
+execution. Node and logical model
 boundaries check deadlines, cancellation, call counts, input/output budgets and
 configured cost limits. Native structured-output calls, fallback completions and
 repair attempts consume logical calls when invoked; hidden SDK retries are not

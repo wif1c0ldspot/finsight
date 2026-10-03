@@ -110,7 +110,9 @@ example are illustrative controls, not measured hardware recommendations.
   reports additionally contain questions and answers and may contain private data.
 
 The Python `RunContext` supports a caller-supplied cancellation event and token
-counter; each invocation requires a fresh context. See [architecture](docs/architecture.md).
+counter. It inherits configured limits and can only tighten them; explicit cost
+rates must match configured rates. Each invocation requires a fresh context.
+See [architecture](docs/architecture.md).
 
 ### Hosted or compatible providers
 

@@ -50,7 +50,7 @@ from finsight.rag.models import RetrievedChunk
 EVALUATION_CONFIG_FIELDS = (
     "llm_temperature", "llm_timeout_s", "llm_max_retries", "embed_timeout_s",
     "embed_max_retries", "chunk_size", "chunk_overlap", "chunk_max_tokens", "retrieval_top_k",
-    "retrieval_candidates", "context_max_chars", "max_retrieval_attempts",
+    "retrieval_candidates", "collection_name", "context_max_chars", "max_retrieval_attempts",
     "enforce_grounding", "use_mcp_tools", "run_timeout_s", "run_max_model_calls",
     "run_max_input_tokens", "run_max_output_tokens", "llm_max_output_tokens",
     "run_max_cost_usd", "input_cost_per_million", "output_cost_per_million",

@@ -82,6 +82,25 @@ class RunLimits:
         ):
             raise ValueError("Cost budget requires explicit input and output rates")
 
+    def tightened_by(self, requested: RunLimits) -> RunLimits:
+        """Combine optional per-run limits without weakening configured controls.
+
+        Rates are accounting inputs, not ceilings: keep their meaning stable and
+        reject conflicting supplied rates instead of silently repricing a run.
+        """
+        values: dict[str, Any] = {}
+        for name in ("timeout_s", "max_model_calls", "max_input_tokens", "max_output_tokens",
+                     "max_output_tokens_per_call", "max_cost_usd"):
+            configured, supplied = getattr(self, name), getattr(requested, name)
+            candidates = [value for value in (configured, supplied) if value is not None]
+            values[name] = min(candidates) if candidates else None
+        for name in ("input_cost_per_million", "output_cost_per_million"):
+            configured, supplied = getattr(self, name), getattr(requested, name)
+            if configured is not None and supplied is not None and configured != supplied:
+                raise ValueError(f"RunContext {name} must match the configured cost rate")
+            values[name] = configured if configured is not None else supplied
+        return RunLimits(**values)
+
     @classmethod
     def from_settings(cls, settings: Settings) -> RunLimits:
         return cls(
@@ -332,7 +351,9 @@ class AgentRunner:
     """Compiled graph facade with fresh accounting for every invoke/ainvoke.
 
     Pass ``runtime=RunContext(...)`` for cancellation or a custom token counter.
-    Contexts are single-use. Streaming is intentionally not exposed: it must not
+    Supplied contexts inherit configured limits and can only tighten them; explicit
+    cost rates must agree with configured rates. Contexts are single-use.
+    Streaming is intentionally not exposed: it must not
     bypass the invocation boundary or accidentally hide terminal budget errors.
     """
     def __init__(self, graph: Any, limits: RunLimits) -> None:
@@ -343,6 +364,8 @@ class AgentRunner:
         context = runtime if runtime is not None else RunContext(self.limits)
         if context._claimed:
             raise ValueError("RunContext is single-use; create one per invocation")
+        if runtime is not None:
+            context.limits = self.limits.tightened_by(context.limits)
         context._claimed = True
         context._started = context.clock()
         return context

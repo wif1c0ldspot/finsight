@@ -71,7 +71,7 @@ def test_doctor_reports_hosted_embeddings_as_not_checked(monkeypatch, tmp_path):
     monkeypatch.setattr(httpx, "get", get)
     output = run_doctor(monkeypatch, tmp_path, embed_provider="openai")
     assert requests == ["http://localhost:11434/api/tags"]
-    assert "unreachable: service offline" in output
+    assert "unreachable (ConnectError)" in output
     assert "not checked (openai; authenticated probe required)" in output
 
 
@@ -91,4 +91,30 @@ def test_doctor_reports_invalid_port_without_traceback(monkeypatch, tmp_path):
         llm_base_url="http://localhost:invalid",
         embed_base_url="http://localhost:invalid",
     )
-    assert output.count("unreachable: Invalid port: 'invalid'") == 2
+    assert output.count("unreachable (InvalidURL)") == 2
+
+
+def test_doctor_redacts_endpoint_credentials(monkeypatch, tmp_path):
+    output = run_doctor(
+        monkeypatch, tmp_path,
+        llm_provider="openai_compatible",
+        llm_base_url="https://alice:private-password@chat.example/v1?key=query-secret#fragment-secret",
+        embed_provider="openai_compatible",
+        embed_base_url="https://bob:embed-password@embed.example/v2?token=embed-secret",
+    )
+    assert "chat.example/v1" in output
+    assert "embed.example/v2" in output
+    for secret in ("alice", "private-password", "query-secret", "fragment-secret",
+                   "bob", "embed-password", "embed-secret"):
+        assert secret not in output
+
+
+def test_doctor_does_not_echo_network_exception_payload(monkeypatch, tmp_path):
+    def get(url, *, timeout):
+        raise httpx.ConnectError("failed at https://user:password@example?key=private-token")
+
+    monkeypatch.setattr(httpx, "get", get)
+    output = run_doctor(monkeypatch, tmp_path)
+    assert output.count("unreachable (ConnectError)") == 2
+    for secret in ("password", "private-token", "https://user"):
+        assert secret not in output
