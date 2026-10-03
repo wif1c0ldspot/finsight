@@ -20,7 +20,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from pydantic import BaseModel, Field
 
 from finsight.graph.state import AgentState
-from finsight.guardrails.validation import assess_grounding, redact_pii
+from finsight.guardrails.validation import assess_grounding, redact_pii, validate_query
 from finsight.rag.format import render_context
 from finsight.rag.models import RetrievedChunk
 from finsight.structured import StructuredOutputError, invoke_structured
@@ -68,8 +68,10 @@ def make_retrieve_node(retrieve: RetrieveFn) -> NodeFn:
     """
 
     def retrieve_node(state: AgentState) -> AgentState:
-        query = state.get("current_query") or state["question"]
+        question = validate_query(state["question"])
+        query = validate_query(state.get("current_query") or question)
         return {
+            "question": question,
             "retrieved": retrieve(query),
             "current_query": query,
             "attempted_queries": [*state.get("attempted_queries", []), query],
@@ -141,6 +143,10 @@ def make_reformulate_node(llm: BaseChatModel) -> NodeFn:
             grounding_note=state.get("grounding_note") or "No grounding failure.",
         )
         new_query = _invoke_text(llm, prompt)
+        try:
+            new_query = validate_query(new_query)
+        except ValueError:
+            new_query = ""
         normalized = " ".join(new_query.casefold().split())
         duplicate = normalized in {" ".join(query.casefold().split()) for query in attempted}
         exhausted = not normalized or duplicate
@@ -173,6 +179,18 @@ def make_answer_node(
     def answer_node(state: AgentState) -> AgentState:
         chunks = state.get("retrieved", [])
         context = render_context(chunks, context_max_chars)
+        if not context.citations:
+            return {
+                "context_citations": {},
+                "context_text": "",
+                "no_evidence": True,
+                "answer": "I cannot answer from the available sources because no usable "
+                "context was retrieved or fit within the context budget.",
+                "citations": [],
+                "grounded": False,
+                "dangling_citations": [],
+                "grounding_note": "No source text was available to support an answer.",
+            }
         prompt = ANSWER_PROMPT.format(
             question=state["question"],
             context=context.text,
@@ -180,6 +198,7 @@ def make_answer_node(
         answer = redact_pii(_invoke_text(llm, prompt))
         grounding = assess_grounding(answer, context.citations)
         return {
+            "no_evidence": False,
             "context_citations": context.citations,
             "context_text": context.text,
             "answer": answer,
@@ -201,7 +220,7 @@ def make_finalize_node(*, enforce_grounding: bool) -> NodeFn:
     """
 
     def finalize_node(state: AgentState) -> AgentState:
-        if state.get("grounded", False) or not enforce_grounding:
+        if state.get("grounded", False) or state.get("no_evidence") or not enforce_grounding:
             return {}
         note = state.get("grounding_note", "Answer is not grounded in the retrieved context.")
         answer = state.get("answer", "")

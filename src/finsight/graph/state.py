@@ -38,6 +38,7 @@ class AgentState(TypedDict, total=False):
     citations: list[str]
     context_citations: dict[int, RetrievedChunk]
     context_text: str
+    no_evidence: bool
 
     # grounding
     grounded: bool

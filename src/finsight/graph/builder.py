@@ -63,7 +63,7 @@ def _verify_router(max_attempts: int) -> Callable[[AgentState], str]:
 
 def _grade_router(max_attempts: int, enforce_grounding: bool) -> Callable[[AgentState], str]:
     def route(state: AgentState) -> str:
-        if state.get("grounded"):
+        if state.get("grounded") or state.get("no_evidence"):
             return "finalize"
         if (
             not enforce_grounding
@@ -142,4 +142,8 @@ def build_agent(
     )
     graph.add_edge("finalize", END)
 
-    return graph.compile()
+    # Each full retry can execute retrieve/verify/answer/grade/reformulate.
+    # Keep LangGraph's safety limit above the configured finite loop budget.
+    return graph.compile().with_config(
+        {"recursion_limit": 6 * (settings.max_retrieval_attempts + 1) + 4}
+    )

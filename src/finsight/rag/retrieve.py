@@ -10,6 +10,7 @@ from langchain_core.embeddings import Embeddings
 from rank_bm25 import BM25Okapi
 
 from finsight.config import Settings
+from finsight.guardrails.validation import validate_query
 from finsight.llm import build_embeddings
 from finsight.rag.index import (
     IndexIntegrityError,
@@ -58,9 +59,15 @@ class HybridRetriever:
                 f"No chunk registry at {registry}. Build the index first: finsight ingest"
             )
 
-        self._chunks = [
-            chunk_from_dict(d) for d in json.loads(registry.read_text(encoding="utf-8"))
-        ]
+        try:
+            raw = json.loads(registry.read_text(encoding="utf-8"))
+            if not isinstance(raw, list):
+                raise ValueError("Chunk registry must be a JSON array")
+            self._chunks = [chunk_from_dict(d) for d in raw]
+        except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
+            raise IndexIntegrityError(
+                f"Chunk registry is malformed ({exc}). Re-run: finsight ingest"
+            ) from exc
         if not self._chunks:
             raise IndexIntegrityError("Chunk registry is empty. Re-run: finsight ingest")
 
@@ -71,6 +78,7 @@ class HybridRetriever:
             collection=settings.collection_name,
             embed_provider=settings.embed_provider,
             embed_model=settings.embed_model,
+            embed_base_url=settings.resolved_embed_base_url(),
         )
 
         # BM25 cannot initialize an empty vocabulary. Such corpora are still
@@ -131,8 +139,11 @@ class HybridRetriever:
 
     def retrieve(self, query: str, top_k: int | None = None) -> list[RetrievedChunk]:
         """Return the top-k chunks for ``query`` via hybrid RRF fusion."""
-        k = top_k or self._settings.retrieval_top_k
-        cand = self._settings.retrieval_candidates
+        query = validate_query(query)
+        k = self._settings.retrieval_top_k if top_k is None else top_k
+        if type(k) is not int or k <= 0:
+            raise ValueError("top_k must be a positive integer")
+        cand = min(self.chunk_count, max(self._settings.retrieval_candidates, k))
         vector_hits = self._vector_search(query, cand)
         bm25_hits = self._bm25_search(query, cand)
         return self._rrf_fuse(vector_hits, bm25_hits, k)

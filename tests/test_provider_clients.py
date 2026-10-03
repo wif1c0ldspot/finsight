@@ -74,3 +74,15 @@ def test_stdio_uses_configured_corpus_and_reports_tool_errors(
     with pytest.raises(MCPToolError, match="Unknown document") as error:
         call_tool("get_document", doc_id="missing")
     assert error.value.tool == "get_document"
+
+
+@pytest.mark.parametrize("arguments,error", [
+    ({"query": "  "}, "Query is empty"),
+    ({"query": "x" * 2001}, "Query exceeds"),
+    ({"query": "valid", "top_k": 0}, "greater than 0"),
+    ({"query": "valid", "top_k": True}, "valid integer"),
+])
+def test_stdio_invalid_search_fails_before_loading_index(monkeypatch, tmp_path, arguments, error):
+    monkeypatch.setenv("FINSIGHT_INDEX_DIR", str(tmp_path / "absent-index"))
+    with pytest.raises(MCPToolError, match=error):
+        call_tool("search_documents", **arguments)

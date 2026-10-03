@@ -136,3 +136,15 @@ def test_settings_drive_the_collection_name():
     """The collection name is configuration, not a literal duplicated in two files."""
     assert Settings(collection_name="custom").collection_name == "custom"
     assert Settings().collection_name == "finsight"
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_manifest_without_endpoint_identity_requires_rebuild(tmp_path, version):
+    _write(tmp_path, _chunks("a:0"))
+    path = tmp_path / "manifest.json"
+    data = json.loads(path.read_text())
+    data["version"] = version
+    data.pop("embed_endpoint_hash")
+    path.write_text(json.dumps(data))
+    with pytest.raises(IndexIntegrityError, match="Legacy index.*finsight ingest"):
+        read_manifest(tmp_path)

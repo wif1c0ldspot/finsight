@@ -276,3 +276,59 @@ def test_rewrite_cannot_cycle_back_to_an_earlier_query():
     final = _agent(_settings(max_retrieval_attempts=5), retriever, llm).invoke(_seed())
     assert retriever.queries == ["Who founded Airwallex?", "founders"]
     assert final["reformulation_exhausted"] is True
+
+
+def test_no_evidence_finishes_without_model_generation():
+    retriever = FakeRetriever(chunk_ids=())
+    llm = ScriptedLLM("This unsupported answer must never be generated [1].")
+    final = _agent(_settings(max_retrieval_attempts=0), retriever, llm).invoke(_seed())
+    assert final["no_evidence"] is True
+    assert final["grounded"] is False
+    assert "I cannot answer" in final["answer"]
+    assert "citation warning" not in final["answer"]
+    assert final["context_citations"] == {}
+    assert llm.prompts == []
+
+
+def test_all_context_omitted_does_not_generate_an_answer():
+    retriever = FakeRetriever()
+    llm = ScriptedLLM("Must not be used")
+    final = _agent(
+        _settings(max_retrieval_attempts=0, context_max_chars=1), retriever, llm
+    ).invoke(_seed())
+    assert final["no_evidence"] is True
+    assert final["context_text"] == ""
+    assert llm.prompts == []
+
+
+@pytest.mark.parametrize("question", ["   ", "q" * 2001])
+def test_graph_rejects_invalid_query_before_retrieval(question):
+    retriever = FakeRetriever()
+    with pytest.raises(ValueError):
+        _agent(_settings(), retriever, ScriptedLLM()).invoke(_seed(question))
+    assert retriever.queries == []
+
+
+def test_overlong_rewrite_does_not_reach_retrieval():
+    retriever = FakeRetriever()
+    llm = ScriptedLLM(
+        '{"sufficient": false}', "x" * 2001, "No answer is available."
+    )
+    final = _agent(_settings(), retriever, llm).invoke(_seed())
+    assert len(retriever.queries) == 1
+    assert final["reformulation_exhausted"] is True
+
+
+def test_graph_retry_budget_has_enough_execution_steps():
+    retriever = FakeRetriever()
+    responses = []
+    for attempt in range(6):
+        responses += ['{"sufficient": true}', 'Unsupported answer.']
+        if attempt < 5:
+            responses.append(f"new query {attempt}")
+    final = _agent(
+        _settings(max_retrieval_attempts=5), retriever, ScriptedLLM(*responses)
+    ).invoke(_seed())
+    assert final["attempts"] == 5
+    assert len(retriever.queries) == 6
+    assert "citation warning" in final["answer"]
