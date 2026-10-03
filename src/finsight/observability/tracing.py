@@ -5,10 +5,14 @@ OpenTelemetry spans (or ship traces to LangSmith); the stdlib implementation
 keeps the instrumentation behaviour obvious, deterministic, and testable.
 """
 
+import json
+import os
+import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 
@@ -43,3 +47,22 @@ def timed(collector: MetricsCollector, name: str, **extra: Any) -> Iterator[None
         yield
     finally:
         collector.record(name, (time.perf_counter() - start) * 1000.0, **extra)
+
+
+def write_trace(path: Path, runtime: dict[str, Any]) -> None:
+    """Atomically save content-free runtime telemetry, preserving an older trace on failure."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump({"trace_version": 1, "runtime": runtime}, stream, indent=2, allow_nan=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)

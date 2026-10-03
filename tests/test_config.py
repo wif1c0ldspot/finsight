@@ -266,3 +266,11 @@ def test_self_grading_uses_resolved_endpoint_and_ignores_trailing_slash():
 def test_boolean_counts_are_not_integers(field):
     with pytest.raises(ValueError, match="not booleans"):
         Settings(**{field: True})
+
+
+def test_embedding_revision_is_explicit_and_nonblank(monkeypatch):
+    assert Settings().embed_revision is None
+    monkeypatch.setenv("FINSIGHT_EMBED_REVISION", " deployment-v2 ")
+    assert Settings().embed_revision == "deployment-v2"
+    with pytest.raises(ValueError, match="nonblank"):
+        Settings(embed_revision="  ")

@@ -1,5 +1,6 @@
 """Bounded prompt context with an explicit citation-to-evidence mapping."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from finsight.rag.models import RetrievedChunk
@@ -13,8 +14,24 @@ class RenderedContext:
     citations: dict[int, RetrievedChunk]
 
 
+def render_source(chunk: RetrievedChunk, number: int) -> str:
+    """Render one complete evidence record for generation and claim verification."""
+    source = chunk.chunk
+    provenance = "; ".join(
+        f"{label}: {value}"
+        for label, value in (
+            ("source", source.source_url), ("published", source.published_at),
+            ("retrieved", source.retrieved_at), ("revision", source.revision),
+        )
+        if value is not None
+    )
+    header = f"[{number}] ({source.doc_id})"
+    return f"{header} [{provenance}] {source.text}" if provenance else f"{header} {source.text}"
+
+
 def render_context(
-    chunks: list[RetrievedChunk], max_chars: int | None = None
+    chunks: list[RetrievedChunk], max_chars: int | None = None, *,
+    max_tokens: int | None = None, token_counter: Callable[[str], int] | None = None,
 ) -> RenderedContext:
     """Keep whole chunks within the budget, preserving their original references.
 
@@ -24,20 +41,31 @@ def render_context(
     """
     if max_chars is not None and max_chars < 0:
         raise ValueError("max_chars must be non-negative")
+    if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 0):
+        raise ValueError("max_tokens must be a nonnegative integer")
+
+    def fits(text: str) -> bool:
+        if max_chars is not None and len(text) > max_chars:
+            return False
+        if max_tokens is None:
+            return True
+        # Callers may inject their exact tokenizer. UTF-8 bytes conservatively
+        # bound content for byte-based tokenizers; provider framing is separate.
+        count = token_counter(text) if token_counter else len(text.encode("utf-8"))
+        if type(count) is not int or count < 0:
+            raise ValueError("Token counter must return a nonnegative integer")
+        return count <= max_tokens
+
     blocks: list[str] = []
     citations: dict[int, RetrievedChunk] = {}
-    used = 0
     for number, chunk in enumerate(chunks, start=1):
-        block = f"[{number}] ({chunk.chunk.doc_id}) {chunk.chunk.text}"
-        cost = len(block) + (2 if blocks else 0)
-        if max_chars is not None and used + cost > max_chars:
+        block = render_source(chunk, number)
+        if not fits("\n\n".join([*blocks, block])):
             continue
         blocks.append(block)
         citations[number] = chunk
-        used += cost
     if len(citations) < len(chunks):
-        cost = len(_TRUNCATION_MARKER) + (2 if blocks else 0)
-        if max_chars is None or used + cost <= max_chars:
+        if fits("\n\n".join([*blocks, _TRUNCATION_MARKER])):
             blocks.append(_TRUNCATION_MARKER)
     return RenderedContext(text="\n\n".join(blocks), citations=citations)
 

@@ -49,9 +49,20 @@ class Settings(BaseSettings):
     # Kept for backwards compatibility with the original Ollama-only config.
     ollama_base_url: str = "http://localhost:11434"
 
+    # --- Optional per-invocation controls (disabled unless configured) ---
+    run_timeout_s: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    run_max_model_calls: int | None = Field(default=None, gt=0)
+    run_max_input_tokens: int | None = Field(default=None, gt=0)
+    run_max_output_tokens: int | None = Field(default=None, gt=0)
+    llm_max_output_tokens: int | None = Field(default=None, gt=0)
+    run_max_cost_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    input_cost_per_million: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    output_cost_per_million: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
     # --- Embeddings ---
     embed_provider: EmbedProvider = "ollama"
     embed_model: str = "nomic-embed-text"
+    embed_revision: str | None = None
     embed_base_url: str | None = None
     embed_api_key: str | None = None
     embed_timeout_s: float = Field(default=60.0, gt=0, allow_inf_nan=False)
@@ -68,12 +79,17 @@ class Settings(BaseSettings):
     # --- RAG knobs ---
     chunk_size: int = Field(default=600, gt=0)
     chunk_overlap: int = Field(default=100, ge=0)
+    chunk_max_tokens: int | None = Field(default=None, gt=0)
     retrieval_top_k: int = Field(default=4, gt=0)
     retrieval_candidates: int = Field(default=8, gt=0)  # candidates per method before fusion
     collection_name: str = "finsight"
     # Upper bound on the rendered context block, so a large top_k cannot blow
     # past the model's window silently.
     context_max_chars: int = Field(default=12_000, gt=0)
+    context_max_tokens: int | None = Field(default=None, gt=0)
+    rerank_enabled: bool = False
+    semantic_verification: bool = False
+    semantic_max_segments: int = Field(default=24, gt=0)
 
     # --- Paths (relative to the project root; run commands from there) ---
     data_dir: Path = Path("data")
@@ -96,7 +112,9 @@ class Settings(BaseSettings):
     @field_validator(
         "llm_max_retries", "embed_max_retries", "max_retrieval_attempts",
         "chunk_size", "chunk_overlap", "retrieval_top_k", "retrieval_candidates",
-        "context_max_chars", mode="before",
+        "context_max_chars", "run_max_model_calls", "run_max_input_tokens",
+        "run_max_output_tokens", "llm_max_output_tokens", "context_max_tokens",
+        "semantic_max_segments", "chunk_max_tokens", mode="before",
     )
     @classmethod
     def _reject_boolean_counts(cls, value: object) -> object:
@@ -106,8 +124,21 @@ class Settings(BaseSettings):
             raise ValueError("Counts must be integers, not booleans")
         return value
 
+    @field_validator("embed_revision")
+    @classmethod
+    def _nonblank_embedding_revision(cls, value: str | None) -> str | None:
+        if value is not None:
+            value = value.strip()
+            if not value:
+                raise ValueError("embed_revision must be nonblank when supplied")
+        return value
+
     @model_validator(mode="after")
     def _check_provider_config(self) -> "Settings":
+        if self.run_max_cost_usd is not None and (
+            self.input_cost_per_million is None or self.output_cost_per_million is None
+        ):
+            raise ValueError("run_max_cost_usd requires explicit input and output cost rates")
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError("chunk_overlap must be smaller than chunk_size")
         if self.llm_provider == "openai_compatible" and not self.llm_base_url:

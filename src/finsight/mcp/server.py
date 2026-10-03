@@ -17,6 +17,7 @@ from pydantic import Field
 from finsight.config import get_settings
 from finsight.mcp import tools
 from finsight.rag.index import read_manifest
+from finsight.rag.models import RetrievalFilter
 from finsight.rag.retrieve import HybridRetriever
 
 mcp = FastMCP("finsight", strict_input_validation=True)
@@ -35,15 +36,17 @@ def _get_retriever() -> HybridRetriever:
 
 @mcp.tool()
 def search_documents(
-    query: str, top_k: Annotated[int | None, Field(strict=True, gt=0)] = None,
+    query: str,
+    top_k: Annotated[int | None, Field(strict=True, gt=0)] = None,
+    filters: RetrievalFilter | None = None,
 ) -> list[dict[str, Any]]:
     """Hybrid (vector + BM25) search over the indexed financial corpus."""
     cleaned = tools.validate_search_request(query, top_k)
-    return tools.search_documents(_get_retriever(), cleaned, top_k=top_k)
+    return tools.search_documents(_get_retriever(), cleaned, top_k=top_k, filters=filters)
 
 
 @mcp.tool()
-def list_documents() -> list[dict[str, str]]:
+def list_documents() -> list[dict[str, str | None]]:
     """List the documents available in the indexed corpus."""
     return tools.list_documents(get_settings().corpus_dir)
 
@@ -52,6 +55,12 @@ def list_documents() -> list[dict[str, str]]:
 def get_document(doc_id: str) -> str:
     """Return the full text of a document by its id."""
     return tools.get_document(get_settings().corpus_dir, doc_id)
+
+
+@mcp.tool()
+def get_document_record(doc_id: str) -> dict[str, str | None]:
+    """Return full document text and optional source, dates, and revision."""
+    return tools.get_document_record(get_settings().corpus_dir, doc_id)
 
 
 if __name__ == "__main__":

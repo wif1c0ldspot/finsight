@@ -20,7 +20,7 @@ from urllib.parse import urlsplit, urlunsplit
 from finsight.rag.models import Chunk
 
 #: Bump when the on-disk layout changes incompatibly.
-MANIFEST_VERSION = 3
+MANIFEST_VERSION = 4
 
 MANIFEST_NAME = "manifest.json"
 CHUNKS_NAME = "chunks.json"
@@ -49,6 +49,7 @@ class IndexManifest:
     vector_collection: str
     content_hash: str
     embed_endpoint_hash: str
+    embed_revision: str | None
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -63,6 +64,7 @@ class IndexManifest:
             "vector_collection": self.vector_collection,
             "content_hash": self.content_hash,
             "embed_endpoint_hash": self.embed_endpoint_hash,
+            "embed_revision": self.embed_revision,
         }
 
     @classmethod
@@ -80,6 +82,7 @@ class IndexManifest:
                 vector_collection=str(data["vector_collection"]),
                 content_hash=str(data["content_hash"]),
                 embed_endpoint_hash=str(data["embed_endpoint_hash"]),
+                embed_revision=cast(str | None, data["embed_revision"]),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise IndexIntegrityError(
@@ -128,6 +131,7 @@ def write_manifest(
     generation: str = "",
     vector_collection: str | None = None,
     embed_base_url: str | None = None,
+    embed_revision: str | None = None,
 ) -> None:
     manifest = IndexManifest(
         version=MANIFEST_VERSION,
@@ -141,6 +145,7 @@ def write_manifest(
         vector_collection=vector_collection or collection,
         content_hash=content_hash(chunks),
         embed_endpoint_hash=_endpoint_hash(embed_base_url),
+        embed_revision=embed_revision,
     )
     index_dir.mkdir(parents=True, exist_ok=True)
     temporary = index_dir / f".manifest-{uuid.uuid4().hex}.tmp"
@@ -149,7 +154,10 @@ def write_manifest(
             stream.write(json.dumps(manifest.to_json(), indent=2))
             stream.flush()
             os.fsync(stream.fileno())
-        temporary.replace(manifest_path(index_dir))
+        from finsight.rag.lifecycle import lifecycle_lock
+
+        with lifecycle_lock(index_dir):
+            temporary.replace(manifest_path(index_dir))
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -168,7 +176,7 @@ def read_manifest(index_dir: Path) -> IndexManifest:
         ) from exc
     if not isinstance(raw, dict):
         raise IndexIntegrityError("Index manifest must be a JSON object.")
-    if raw.get("version") in (1, 2) and "chunk_count" in raw:
+    if raw.get("version") in (1, 2, 3) and "chunk_count" in raw:
         raise IndexIntegrityError("Legacy index needs rebuilding. Re-run: finsight ingest")
     return IndexManifest.from_json(raw)
 
@@ -181,6 +189,7 @@ def validate_manifest(
     embed_provider: str,
     embed_model: str,
     embed_base_url: str | None = None,
+    embed_revision: str | None = None,
 ) -> None:
     """Raise :class:`IndexIntegrityError` if the manifest contradicts reality.
 
@@ -201,6 +210,8 @@ def validate_manifest(
         problems.append("manifest chunk ids do not match the chunk registry")
     if manifest.content_hash != content_hash(chunks):
         problems.append("manifest content hash does not match the chunk registry")
+    if manifest.embed_revision != embed_revision:
+        problems.append("embedding revision changed; stored vectors are not comparable")
     if manifest.embed_endpoint_hash != _endpoint_hash(embed_base_url):
         problems.append("embedding endpoint changed; stored vectors are not comparable")
     if manifest.collection != collection:

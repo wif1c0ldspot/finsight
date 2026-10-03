@@ -1,107 +1,117 @@
-# Readiness & Development Roadmap
+# POC roadmap and evidence gates
 
-## Current objective and release boundary
+## Current boundary
 
-Finsight demonstrates a single-turn research agent over a local Markdown corpus:
-hybrid retrieval, bounded reformulation, citation checks, a shared MCP tool surface,
-and measurable evaluation. The implementation supports that POC objective.
+The core local POC roadmap is implemented. Finsight supports single-turn research
+over a small, memory-resident corpus on macOS/Linux with a local POSIX filesystem.
+Automated verification uses deterministic model doubles, local Chroma persistence,
+MCP subprocesses and injected failures. This establishes software behavior, not
+live answer accuracy or production service readiness.
 
-The public repository is intended for local experimentation and evaluation.
-Automated verification covers code paths and failure handling with model doubles,
-real local Chroma collections, and MCP stdio subprocesses. It does not establish
-answer accuracy, live provider compatibility, latency or hardware requirements.
-Live-model testing has been deferred; no live benchmark score is claimed.
+**Live model quality, latency, cost and hardware testing are explicitly deferred
+by request.** This document records those remaining evidence gates; it does not
+claim they have been completed or authorize running them.
 
-## Stability work implemented
+## Completed core work
 
-- Atomic index generations keep the working index available when a later batch
-  fails. Bounded embedding/write batches respect Chroma limits. Manifests bind
-  provider, model, endpoint, content and generation; malformed registries fail
-  with rebuild guidance.
-- Configuration and tool boundaries reject invalid counts, queries and nonfinite
-  timeouts. Search limits expand the candidate pool consistently. MCP uses strict
-  request types and reloads the published generation.
-- Graph retries respect the configured budget. Empty, repeated or overlong
-  rewrites terminate cleanly; an answer without usable evidence is a deterministic
-  abstention. All citation consumers share the bounded evidence map.
-- Evaluation validates inputs, isolates failures, exposes scoring denominators,
-  saves versioned JSON reports, and reports operational failures with a nonzero
-  exit after saving results.
-- Public setup instructions distinguish code verification from model evaluation.
-  CI covers base and hosted extras across the declared Python versions.
+### Evidence and retrieval
 
-## Next release gate: live evaluation evidence
+- Eleven historical primary-source summaries carry URLs, publication/retrieval
+  dates and local revisions. Metadata reaches chunks, prompts, CLI output and
+  `get_document_record`; filters scope document IDs, URLs and publication dates.
+- Unicode BM25 with Han character tokens complements dense retrieval through RRF.
+  Nonmatching lexical results do not gain an arbitrary rank bonus.
+- Optional LLM reranking validates complete candidate rankings and falls back to
+  RRF on invalid output. Optional semantic support checks require a verdict for
+  every answer segment against its own cited sources, ending in abstention when
+  checks remain unsuccessful. Both features default off pending empirical evidence.
+- Character and optional token-content bounds constrain chunking/context. Exact
+  counters can be injected; UTF-8 content bytes are the fallback, excluding
+  provider framing overhead. All citation consumers share the rendered evidence map.
 
-This is the first priority before claiming demonstrated answer quality.
+### Storage and execution
 
-1. On a machine with a configured model service, run `uv run finsight doctor`, then
-   `uv run finsight ingest`. Record the model revisions and hardware outside the report
-   if the provider only exposes mutable model aliases.
-2. Run representative `uv run finsight ask` questions and `uv run finsight mcp-demo`
-   through the installed CLI. Verify citations against source text, including an
-   unanswerable question and a question that needs reformulation.
-3. Choose a separately configured judge where possible. Run
-   `uv run finsight evaluate --output reports/baseline.json` on unchanged input data.
-4. Inspect operational and metric errors and the scored denominators before the
-   averages. Repeat failed cases after fixing their cause. Manually review model
-   and judge outputs; a successful command is not an accuracy threshold.
-5. Record observed latency and memory use, preserve the configuration and data
-   hashes, and compare repeated runs before publishing benchmark claims. Choose
-   quality thresholds based on the intended use case rather than inventing them
-   from this nine-case fixture.
+- Manifest v4 publishes immutable index generations atomically and binds provider,
+  model, endpoint hash, optional embedding revision and content. Versions 1–3
+  rebuild via `ingest`.
+- Compatible unchanged text reuses vectors while changed/deleted content and
+  provenance appear in the new generation. `ingest --full` bypasses reuse when a
+  mutable model alias changes behind an unchanged identity.
+- POSIX reader/builder leases and explicit dry-run/apply cleanup protect active
+  and published generations. Retention/age controls leave unmanaged artifacts alone.
+- Per-invocation logical call, content-token, output and configured cost controls
+  share fresh runtime accounting. Deadlines/cancellation are cooperative and do not
+  preempt synchronous calls. Sanitized traces preserve timings, usage and terminal
+  statuses; cost figures exclude embeddings and evaluation judges.
 
-The bundled five company summaries and nine golden cases are a smoke-test dataset.
-They have no maintained source/date provenance and are insufficient for statistical
-claims or current financial research.
+### Evaluation and usability
 
-## Architecture work still needed
+- Forty authored cases span single-fact, numerical, multi-document, temporal,
+  misleading, unavailable and adversarial questions. The 20 development / 20 held-out
+  partitions are public fixtures from one corpus, **not independent benchmark data**.
+- Golden validation precedes model construction. Agent/judge failures are isolated;
+  unscored results and denominators remain visible, including category coverage.
+- Atomic per-case checkpoints survive interruptions. Resume checks input/model/config/
+  index identity and selection; recorded failures can be explicitly retried.
+- Report comparison retains independent aggregates but computes each metric delta
+  only on paired scored IDs. Pair counts, coverage and errors accompany deltas;
+  no significance or quality threshold is inferred.
+- CLI examples, `.env.example`, strict MCP inputs, provider construction tests and
+  CI for base/hosted extras support reproducible setup.
 
-### Evidence quality and retrieval
+## Deferred evidence gates
 
-- **Source provenance and freshness:** introduce source URLs, publication and
-  retrieval dates, document revisions and metadata filters. Acceptance: every
-  presented fact can be traced to a dated source and filtered by intended scope.
-- **Larger evaluation set:** add held-out, multi-document, numerical, misleading,
-  unanswerable and adversarial cases with reviewed labels. Acceptance: report
-  category scores, error coverage and repeatability with a documented dataset.
-- **Semantic claim support:** assess whether cited passages support each claim.
-  Existing citation validation only checks reference existence. Acceptance:
-  deliberately misattributed claims are detected on a reviewed test set.
-- **Token budgets and reranking:** measure tokenizer-aware chunk/context limits and
-  a reranker against the saved baseline. Acceptance: improved retrieval/answer
-  quality with documented latency and cost; adoption depends on measured benefit.
-- **Multilingual sparse retrieval:** replace or supplement the ASCII tokenizer
-  when the corpus requires it. Acceptance: lexical matches work for the supported
-  languages without degrading the current corpus.
+When live testing is explicitly resumed, use saved artifacts rather than relying
+on a few convincing answers:
 
-### Storage and resource management
+1. Record hardware, provider/model revisions and any mutable alias limitations.
+   Check `doctor`, ingest the documented corpus, and manually inspect representative
+   answerable and unanswerable CLI/MCP responses against source text.
+2. Save development-cohort baseline reports with fixed corpus/golden identities and
+   budgets. Inspect operational errors, incomplete cases and scored denominators
+   before reading averages. Resume with the same selection flags; retry errors
+   explicitly after addressing their cause.
+3. Test reranking, semantic verification and exact token counters against that
+   baseline. Record additional logical calls, wall time, provider usage and memory.
+   Agent traces exclude evaluation-judge and embedding work; measure those costs
+   separately when making end-to-end comparisons.
+4. Review disputed answers and judge verdicts with humans. Check dates, currencies,
+   qualifications and numerical reasoning. A correctly formatted judge verdict can
+   still be wrong, and a citation-valid answer can still misstate its source.
+5. Use the public held-out partition only with its authorship/tuning limitations
+   disclosed. Obtain broader independently collected cases and human-adjudicated
+   labels before generalizing results. Define acceptance thresholds from the intended
+   workflow; neither the fixture size nor a successful command establishes them.
 
-- **Generation cleanup and incremental indexing:** safely reclaim old and failed
-  generations after readers release them; update changed documents without full
-  re-embedding. Acceptance: reader safety, bounded disk growth and recovery tests.
-- **Model identity:** endpoint/model names do not identify immutable weights.
-  Record provider model revisions where available and define a rebuild policy.
-- **Resource controls:** add run-wide deadlines, cancellation, token/cost budgets
-  and capacity limits. Current call timeouts and retry counts do not impose a total
-  time or cost ceiling. Acceptance: cancellation and exhaustion terminate cleanly
-  with preserved results under injected delays and failures.
-- **Observability and resumable evaluation:** add per-node timings, token usage,
-  structured traces and incremental report checkpoints. Current reports survive
-  case errors but are only written at run completion.
+Dataset sourcing, category definitions and limitations are in [dataset.md](dataset.md).
+No live benchmark score or measured improvement is bundled.
 
-### Required only before a remotely hosted service
+## Operator responsibilities and remaining limitations
 
-- Authentication, authorization, per-user data isolation, rate limits and a
-  configured TLS boundary. The included HTTP MCP server is a local demo.
-- A threat model for untrusted documents/tools, prompt-injection tests and a
-  privacy policy appropriate to the data. Regex redaction is illustrative and
-  cannot guarantee removal of sensitive information.
-- Deployment health/readiness checks, backup/restore, concurrent-load testing,
-  operational monitoring and a documented dependency/security update process.
+An embedding revision is operator-supplied metadata, not a provider weight hash
+verified by Finsight. Maintain revision discipline and force a full rebuild when
+an alias changes without an identity update. Source dates describe historical
+snapshots; there is no automatic freshness monitor or guarantee about current facts.
 
-## Optional product extensions
+Fallback token accounting is content-only. Cost estimates use explicitly supplied
+rates and reported usage where available; they are not an account billing ceiling.
+Logical call counts do not enumerate hidden SDK retries. Cooperative cancellation
+cannot terminate an arbitrary already-running synchronous call.
 
-Conversation memory, checkpoints, streaming, a web UI, numerical/calculator tools,
-model-selected tool calls and multi-agent delegation are not implemented. They
-are independent extensions, not prerequisites for this single-turn local POC.
-Add them only when an evaluation case or user workflow demonstrates a need.
+The current in-memory registry/BM25/cache and local POSIX leases constrain scale
+and deployment. Unicode lexical handling is a baseline, not comprehensive linguistic
+segmentation. PII heuristics, semantic checks and adversarial fixtures do not form
+a complete privacy or prompt-injection security boundary.
+
+## Optional deferred service and product work
+
+Before exposing a remote service, design authentication/authorization, tenant/data
+isolation, TLS termination, request quotas, backup/restore, deployment health checks,
+load testing and operational monitoring. These are service prerequisites, not
+completed properties of the included HTTP demo. Extend the threat model and privacy
+policy for the actual data and users.
+
+A web UI, streaming responses, conversation memory, calculator/numerical tools,
+model-selected tool calls and multi-agent research workflows remain optional
+extensions. Evaluation checkpoints are implemented; conversational persistence is
+not. Add product features when a concrete workflow or evaluation case warrants them.

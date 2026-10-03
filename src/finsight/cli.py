@@ -18,10 +18,10 @@ from rich.table import Table
 
 from finsight.config import Settings, get_settings
 from finsight.eval.harness import (
-    evaluation_provenance,
+    EvalSplit,
+    EvaluationCheckpointError,
     run_eval,
     summarize,
-    write_evaluation_report,
 )
 from finsight.graph.builder import build_agent
 from finsight.guardrails.validation import (
@@ -29,9 +29,12 @@ from finsight.guardrails.validation import (
     assess_grounding,
     validate_query,
 )
-from finsight.observability.tracing import MetricsCollector, timed
+from finsight.observability.tracing import MetricsCollector, timed, write_trace
 from finsight.rag.index import IndexIntegrityError, IndexMissingError
-from finsight.rag.ingest import build_index
+from finsight.rag.ingest import BuildStats, build_index
+from finsight.rag.lifecycle import cleanup_generations
+from finsight.rag.models import RetrievalFilter
+from finsight.runtime import RunLimitError
 from finsight.structured import StructuredOutputError
 
 app = typer.Typer(help="Finsight -- financial research agent over a local corpus.")
@@ -70,14 +73,18 @@ def _fail(exc: Exception) -> None:
         if isinstance(exc, exc_type):
             console.print(
                 Panel(
-                    f"{exc}\n\n[bold]What to do:[/bold] {hint}",
+                    f"{type(exc).__name__}\n\n[bold]What to do:[/bold] {hint}",
                     title="Error",
                     border_style="red",
                 )
             )
             raise typer.Exit(code=1) from exc
     console.print(
-        Panel(f"{type(exc).__name__}: {exc}", title="Unexpected error", border_style="red")
+        Panel(
+            str(exc) if isinstance(exc, RunLimitError)
+            else f"{type(exc).__name__}: check inputs, configuration and service availability.",
+            title="Error", border_style="red",
+        )
     )
     raise typer.Exit(code=1) from exc
 
@@ -166,18 +173,43 @@ def doctor() -> None:
 
 
 @app.command()
-def ingest() -> None:
+def ingest(full: Annotated[bool, typer.Option(help="Re-embed all chunks without reuse.")] = False
+           ) -> None:
     """Chunk, embed, and index the corpus under data/corpus."""
     try:
         settings = get_settings()
         metrics = MetricsCollector()
+        stats: list[BuildStats] = []
         with timed(metrics, "ingest"):
-            n = build_index(settings)
+            n = build_index(settings, incremental=not full, on_stats=stats.append)
     except Exception as exc:
         _fail(exc)
         return
     console.print(f"[green]Indexed {n} chunks[/green] from {settings.corpus_dir}")
+    if stats:
+        console.print(f"Embedded {stats[-1].embedded_chunks}; reused {stats[-1].reused_chunks}.")
     console.print(metrics.summary())
+
+
+@app.command()
+def index_cleanup(
+    apply: Annotated[bool, typer.Option("--apply", help="Delete eligible inactive generations.")]
+    = False,
+    keep: Annotated[int, typer.Option(min=0, help="Retain this many newest generations.")] = 2,
+    min_age_hours: Annotated[float, typer.Option(min=0, help="Minimum age before cleanup.")] = 24,
+) -> None:
+    """Preview old-generation cleanup; deletion requires --apply and an inactive lease."""
+    try:
+        records = cleanup_generations(
+            get_settings(), keep=keep, min_age_seconds=min_age_hours * 3600, dry_run=not apply,
+        )
+    except Exception as exc:
+        _fail(exc)
+        return
+    console.print("Cleanup applied." if apply else "Dry run: no generations deleted.")
+    console.print_json(json.dumps([
+        {"generation": r.generation, "action": r.action} for r in records
+    ]))
 
 
 def _render_grounding(grounding: GroundingAssessment) -> None:
@@ -188,18 +220,55 @@ def _render_grounding(grounding: GroundingAssessment) -> None:
 
 
 @app.command()
-def ask(question: str) -> None:
+def ask(
+    question: str,
+    doc: Annotated[list[str] | None, typer.Option("--doc", help="Restrict document IDs.")] = None,
+    source_url: Annotated[list[str] | None, typer.Option(help="Restrict source URLs.")] = None,
+    published_after: Annotated[str | None, typer.Option(help="Inclusive YYYY-MM-DD.")] = None,
+    published_before: Annotated[str | None, typer.Option(help="Inclusive YYYY-MM-DD.")] = None,
+    trace: Annotated[Path | None, typer.Option(help="Save sanitized telemetry as JSON.")] = None,
+    timeout: Annotated[float | None, typer.Option(help="Cooperative run deadline in seconds.")]
+    = None,
+    max_model_calls: Annotated[int | None, typer.Option(help="Logical model-call budget.")] = None,
+    rerank: Annotated[bool | None, typer.Option("--rerank/--no-rerank")] = None,
+    verify_claims: Annotated[bool | None, typer.Option("--verify-claims/--no-verify-claims")]
+    = None,
+) -> None:
     """Answer a single question through the agent graph."""
     try:
         settings = get_settings()
+        overrides = {key: value for key, value in {
+            "run_timeout_s": timeout, "run_max_model_calls": max_model_calls,
+            "rerank_enabled": rerank, "semantic_verification": verify_claims,
+        }.items() if value is not None}
+        if overrides:
+            settings = Settings.model_validate({**settings.model_dump(), **overrides})
         question = validate_query(question)
-        agent = build_agent(settings)
+        filters = None
+        if any(value is not None for value in (doc, source_url, published_after, published_before)):
+            filters = RetrievalFilter(
+                doc_ids=doc, source_urls=source_url,
+                published_after=published_after, published_before=published_before,
+            )
+        agent = (
+            build_agent(settings, filters=filters) if filters is not None else build_agent(settings)
+        )
         metrics = MetricsCollector()
         with timed(metrics, "agent"):
             final: dict[str, Any] = agent.invoke(
                 {"question": question, "current_query": question, "attempts": 0}
             )
+        if trace is not None:
+            write_trace(trace, final.get("runtime", {}))
     except Exception as exc:
+        runtime = (
+            exc.summary if isinstance(exc, RunLimitError) else getattr(exc, "runtime_summary", None)
+        )
+        if trace is not None and isinstance(runtime, dict):
+            try:
+                write_trace(trace, runtime)
+            except OSError:
+                console.print("Could not save the run trace.", markup=False)
         _fail(exc)
         return
 
@@ -217,6 +286,8 @@ def ask(question: str) -> None:
     table.add_column("#", justify="right")
     table.add_column("Chunk")
     table.add_column("Doc")
+    table.add_column("Published")
+    table.add_column("Source")
     table.add_column("RRF", justify="right")
     evidence = final.get("context_citations", dict(enumerate(retrieved, start=1)))
     for i, chunk in evidence.items():
@@ -226,6 +297,8 @@ def ask(question: str) -> None:
             str(i),
             chunk.chunk.chunk_id,
             chunk.chunk.doc_id,
+            chunk.chunk.published_at or "unknown",
+            chunk.chunk.source_url or "local file",
             f"{chunk.score:.4f} {detail}".strip(),
         )
     console.print(table)
@@ -238,25 +311,46 @@ def ask(question: str) -> None:
     if final.get("attempts"):
         console.print(f"[dim]reformulation attempts: {final['attempts']}[/dim]")
     console.print(metrics.summary())
+    if final.get("rerank_note"):
+        console.print(final["rerank_note"], markup=False)
+    if final.get("semantic_supported") is not None:
+        console.print(f"Semantic support passed: {final['semantic_supported']}", markup=False)
+    if final.get("runtime"):
+        runtime = final["runtime"]
+        console.print(f"Model calls: {runtime['model_calls']}; run status: {runtime['status']}")
+    if trace is not None:
+        console.print(f"Run trace saved: {trace}", markup=False)
 
 
 @app.command()
 def evaluate(
-    output: Annotated[Path | None, typer.Option(help="Save a JSON evaluation report.")] = None,
+    output: Annotated[Path | None, typer.Option(help="Save an atomic JSON checkpoint.")] = None,
+    resume: Annotated[Path | None, typer.Option(help="Resume a matching checkpoint.")] = None,
+    retry_failures: Annotated[bool, typer.Option(help="Retry errors when resuming.")] = False,
+    category: Annotated[list[str] | None, typer.Option(help="Category (repeatable).")] = None,
+    split: Annotated[EvalSplit | None, typer.Option(help="Select development or held_out.")] = None,
 ) -> None:
-    """Run the golden-set evaluation; preserve case failures in an optional report."""
+    """Evaluate selected golden cases, checkpointing every completed case."""
+    destination = output or resume
     try:
         settings = get_settings()
-        before = evaluation_provenance(settings) if output is not None else None
         metrics = MetricsCollector()
         with timed(metrics, "eval"):
-            results = run_eval(settings)
-        summary = summarize(results, judge_is_same_model=settings.judge_is_same_model)
-        if output is not None and before is not None:
-            write_evaluation_report(
-                output, results, summary, before, evaluation_provenance(settings)
+            results = run_eval(
+                settings, output=output, resume=resume, retry_failures=retry_failures,
+                categories=category, split=split.value if split is not None else None,
             )
-            console.print(f"Evaluation report saved: {output}", markup=False)
+        summary = summarize(results, judge_is_same_model=settings.judge_is_same_model)
+        if destination is not None:
+            console.print(f"Evaluation report saved: {destination}", markup=False)
+    except EvaluationCheckpointError as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from None
+    except KeyboardInterrupt:
+        message = (f"Evaluation interrupted; completed cases saved in {destination}."
+                   if destination is not None else "Evaluation interrupted.")
+        console.print(message, markup=False)
+        raise typer.Exit(code=130) from None
     except Exception as exc:
         # Provider/validation exception messages may contain credentials or input data.
         console.print(f"Evaluation failed ({type(exc).__name__}).", markup=False)
@@ -265,6 +359,19 @@ def evaluate(
     console.print(metrics.summary())
     if summary.get("n_operational_failures", 0):
         raise typer.Exit(code=1)
+
+
+@app.command()
+def compare(baseline: Path, candidate: Path) -> None:
+    """Compare matching evaluation reports, including category scoring coverage."""
+    from finsight.eval.compare import ReportComparisonError, compare_reports
+
+    try:
+        comparison = compare_reports(baseline, candidate)
+    except ReportComparisonError as exc:
+        console.print(str(exc), markup=False)
+        raise typer.Exit(code=1) from None
+    console.print_json(json.dumps(comparison, indent=2))
 
 
 @app.command()
