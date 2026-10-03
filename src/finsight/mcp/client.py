@@ -26,11 +26,13 @@ class MCPToolError(RuntimeError):
 def _server_params() -> StdioServerParameters:
     # The SDK supplies its own process allowlist (PATH, HOME, etc.). Add only
     # application settings and the provider credentials our factories consume.
+    # Preserve name/order while matching Pydantic's case-insensitive prefix;
+    # provider SDK credential names remain explicitly scoped and case-sensitive.
     provider_keys = {"OPENAI_API_KEY", "ANTHROPIC_API_KEY"}
     env = {
         name: value
         for name, value in os.environ.items()
-        if name.startswith("FINSIGHT_") or name in provider_keys
+        if name.upper().startswith("FINSIGHT_") or name in provider_keys
     }
     return StdioServerParameters(
         command=sys.executable, args=["-m", "finsight.mcp.server"], env=env

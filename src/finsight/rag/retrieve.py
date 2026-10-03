@@ -38,7 +38,7 @@ class HybridRetriever:
 
     _settings: Settings
     _chunks: list[Chunk]
-    _bm25: BM25Okapi
+    _bm25: BM25Okapi | None
     _collection: Any
     _embeddings: Embeddings
 
@@ -73,8 +73,10 @@ class HybridRetriever:
             embed_model=settings.embed_model,
         )
 
-        # BM25 is rebuilt in memory rather than loaded from a pickled index.
-        self._bm25 = BM25Okapi([tokenize(c.text) for c in self._chunks])
+        # BM25 cannot initialize an empty vocabulary. Such corpora are still
+        # useful to the embedding model, so retain dense retrieval on its own.
+        tokenized = [tokenize(c.text) for c in self._chunks]
+        self._bm25 = BM25Okapi(tokenized) if any(tokenized) else None
 
         self._collection = collection if collection is not None else self._load_chroma()
         self._embeddings = embeddings if embeddings is not None else build_embeddings(settings)
@@ -148,6 +150,8 @@ class HybridRetriever:
         return [(cid, 1.0 - float(dist)) for cid, dist in zip(ids, distances[0], strict=True)]
 
     def _bm25_search(self, query: str, k: int) -> list[tuple[str, float]]:
+        if self._bm25 is None:
+            return []
         terms = set(tokenize(query))
         scores = [float(s) for s in self._bm25.get_scores(list(terms))]
         # BM25 can assign zero or negative scores to actual matches in small

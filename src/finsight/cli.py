@@ -135,17 +135,26 @@ def doctor() -> None:
     except (IndexMissingError, IndexIntegrityError) as exc:
         checks.add_row("index manifest", f"not usable: {exc}")
 
-    # Model reachability is best-effort: a hosted provider may need credentials we
-    # cannot validate without making a call.
-    if settings.llm_provider == "ollama":
+    # Chat and embeddings can run on different services. Probe each configured
+    # Ollama endpoint independently; hosted checks would require authentication.
+    for label, provider, base_url in (
+        ("chat endpoint", settings.llm_provider, settings.resolved_llm_base_url()),
+        ("embedding endpoint", settings.embed_provider, settings.resolved_embed_base_url()),
+    ):
+        if provider != "ollama":
+            checks.add_row(label, f"not checked ({provider}; authenticated probe required)")
+            continue
         try:
             import httpx
 
-            base = settings.resolved_llm_base_url()
-            response = httpx.get(f"{base}/api/tags", timeout=3.0)
-            checks.add_row("ollama endpoint", f"reachable (HTTP {response.status_code})")
-        except Exception as exc:
-            checks.add_row("ollama endpoint", f"unreachable: {exc}")
+            response = httpx.get(f"{str(base_url).rstrip('/')}/api/tags", timeout=3.0)
+            if response.is_success:
+                status = f"reachable (HTTP {response.status_code})"
+            else:
+                status = f"failed (HTTP {response.status_code})"
+            checks.add_row(label, status)
+        except (httpx.RequestError, httpx.InvalidURL) as exc:
+            checks.add_row(label, f"unreachable: {exc}")
 
     console.print(checks)
 

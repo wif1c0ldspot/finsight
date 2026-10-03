@@ -23,12 +23,12 @@ from typing import Any, cast
 
 from finsight.config import Settings
 from finsight.eval.metrics import (
-    abstained,
     answer_matches_reference,
     faithfulness,
     ndcg_at_k,
     recall_at_k,
     reciprocal_rank,
+    semantic_abstention,
 )
 from finsight.graph.builder import build_agent
 from finsight.guardrails.validation import assess_grounding
@@ -38,7 +38,7 @@ from finsight.rag.models import RetrievedChunk
 
 @dataclass
 class EvalResult:
-    """Per-case outcome. ``None`` means "not applicable", never "zero"."""
+    """Per-case outcome. ``None`` means unscored or not applicable, never zero."""
 
     id: str
     question: str
@@ -47,7 +47,7 @@ class EvalResult:
     reciprocal_rank: float
     ndcg: float
     grounded: bool
-    abstained: bool
+    abstained: bool | None
     answer: str
     faithfulness: float | None = None
     correctness: float | None = None
@@ -104,7 +104,10 @@ def run_eval(
                 reciprocal_rank=reciprocal_rank(retrieved_doc_ids, expected),
                 ndcg=ndcg_at_k(retrieved_doc_ids, expected, k),
                 grounded=grounding.is_grounded,
-                abstained=abstained(answer),
+                abstained=(
+                    semantic_abstention(active_judge, question, answer)
+                    if not answerable else None
+                ),
                 answer=answer,
                 faithfulness=faithfulness(
                     active_judge, question, answer, list(evidence.values()),
@@ -132,6 +135,8 @@ def summarize(results: list[EvalResult], *, judge_is_same_model: bool = False) -
 
     Retrieval metrics are computed over answerable cases only — negative cases have
     no expected documents, so including them would inflate recall.
+    Abstention averages use scored negative cases only; the scored and error
+    counts disclose coverage so malformed judge verdicts cannot earn credit.
     """
     if not results:
         return {"n": 0}
@@ -140,6 +145,7 @@ def summarize(results: list[EvalResult], *, judge_is_same_model: bool = False) -
     negative = [r for r in results if not r.answerable]
     faithful_scores = [r.faithfulness for r in results if r.faithfulness is not None]
     correctness_scores = [r.correctness for r in results if r.correctness is not None]
+    abstention_scores = [r.abstained for r in negative if r.abstained is not None]
 
     summary: dict[str, Any] = {
         "n": len(results),
@@ -155,8 +161,10 @@ def summarize(results: list[EvalResult], *, judge_is_same_model: bool = False) -
         "n_faithfulness_scored": len(faithful_scores),
         "mean_correctness": _mean(correctness_scores),
         "abstention_rate_on_negative": _mean(
-            [1.0 if r.abstained else 0.0 for r in negative]
+            [1.0 if abstention else 0.0 for abstention in abstention_scores]
         ),
+        "n_abstention_scored": len(abstention_scores),
+        "n_abstention_errors": len(negative) - len(abstention_scores),
     }
     if judge_is_same_model:
         summary["caveat"] = (

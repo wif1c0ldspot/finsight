@@ -18,6 +18,7 @@ from finsight.eval.metrics import (
     abstained,
     answer_matches_reference,
     faithfulness,
+    semantic_abstention,
 )
 from finsight.rag.models import Chunk, RetrievedChunk
 
@@ -187,6 +188,8 @@ def test_run_eval_scores_answerable_and_negative_cases(tmp_path: Path):
     judge = JudgeLLM(
         '{"score": 5, "rationale": "supported"}',
         '{"correct": true, "rationale": "matches"}',
+        '{"declines_to_answer": true, "provides_answer": false}',
+        '{"score": 5}',
     )
     settings = Settings(golden_file=golden)
     results = run_eval(settings, agent=cast(Any, agent), judge=cast(Any, judge))
@@ -198,6 +201,7 @@ def test_run_eval_scores_answerable_and_negative_cases(tmp_path: Path):
     assert answerable.grounded is True
     assert answerable.recall_at_k == 1.0
     assert answerable.correctness == 1.0
+    assert answerable.abstained is None
     assert negative.grounded is False
     assert negative.abstained is True
 
@@ -216,7 +220,12 @@ def test_summarize_reports_negative_cases_separately(tmp_path: Path):
             },
         }
     )
-    judge = JudgeLLM('{"score": 4, "rationale": "ok"}', '{"correct": true, "rationale": "match"}')
+    judge = JudgeLLM(
+        '{"score": 4, "rationale": "ok"}',
+        '{"correct": true, "rationale": "match"}',
+        '{"declines_to_answer": true, "provides_answer": false}',
+        '{"score": 4}',
+    )
     results = run_eval(Settings(golden_file=golden), agent=cast(Any, agent), judge=cast(Any, judge))
     summary = summarize(results)
 
@@ -266,3 +275,79 @@ def test_faithfulness_uses_only_rendered_context():
     assert "visible excerpt" in judge.prompts[0]
     assert "body" not in judge.prompts[0]
     assert faithfulness(judge, "q", "answer", [_chunk("a:0", "a")], context_text="") is None
+
+
+def test_semantic_abstention_rejects_refusal_followed_by_a_guess():
+    answer = "I do not know the revenue, but it was probably $50 million."
+    judge = JudgeLLM('{"declines_to_answer": true, "provides_answer": true}')
+    assert semantic_abstention(judge, "What was revenue?", answer) is False
+    assert answer in judge.prompts[0]
+    assert "What was revenue?" in judge.prompts[0]
+    assert "A refusal followed by a guessed answer is NOT successful abstention" in judge.prompts[0]
+
+
+def test_semantic_abstention_accepts_refusal_without_legacy_keywords():
+    answer = "The supplied sources leave this figure undisclosed; please provide audited accounts."
+    assert abstained(answer) is False  # Legacy heuristic misses the meaning.
+    judge = JudgeLLM('{"declines_to_answer": true, "provides_answer": false}')
+    assert semantic_abstention(judge, "What was revenue?", answer) is True
+
+
+@pytest.mark.parametrize("response", [
+    "yes", '{}', '{"declines_to_answer": true}',
+    '{"declines_to_answer": "true", "provides_answer": false}',
+])
+def test_semantic_abstention_malformed_verdict_is_unscored(response: str):
+    assert semantic_abstention(JudgeLLM(response), "q", "I do not know.") is None
+
+
+@pytest.mark.parametrize("answer", ["", " \n\t"])
+def test_semantic_abstention_empty_answer_fails_without_judge_call(answer: str):
+    judge = JudgeLLM('{"declines_to_answer": true, "provides_answer": false}')
+    assert semantic_abstention(judge, "q", answer) is False
+    assert judge.prompts == []
+
+
+def test_harness_abstention_summary_exposes_scored_and_error_denominators(tmp_path: Path):
+    path = tmp_path / "negative.json"
+    questions = ["refusal", "refusal then guess", "broken verdict", "empty"]
+    path.write_text(json.dumps([
+        {"question": question, "answerable": False} for question in questions
+    ]))
+    agent = StubAgent({
+        "refusal": {"answer": "The source leaves that undisclosed."},
+        "refusal then guess": {"answer": "I do not know, but it was probably $50 million."},
+        "broken verdict": {"answer": "I do not know."},
+        "empty": {"answer": ""},
+    })
+    judge = JudgeLLM(
+        '{"declines_to_answer": true, "provides_answer": false}',
+        '{"declines_to_answer": true, "provides_answer": true}',
+        "malformed", "malformed",
+    )
+    results = run_eval(Settings(golden_file=path), agent=agent, judge=judge)
+    assert [result.abstained for result in results] == [True, False, None, False]
+    summary = summarize(results)
+    assert summary["n_negative"] == 4
+    assert summary["n_abstention_scored"] == 3
+    assert summary["n_abstention_errors"] == 1
+    assert summary["abstention_rate_on_negative"] == 0.333
+    all_failed = summarize([results[2]])
+    assert all_failed["abstention_rate_on_negative"] is None
+    assert all_failed["n_abstention_scored"] == 0
+    assert all_failed["n_abstention_errors"] == 1
+
+
+def test_answerable_cases_do_not_request_abstention_judgment(tmp_path: Path):
+    path = tmp_path / "answerable.json"
+    path.write_text(json.dumps([{"question": "q", "answerable": True}]))
+    judge = JudgeLLM("unused")
+    results = run_eval(
+        Settings(golden_file=path), agent=StubAgent({"q": {"answer": "a"}}), judge=judge
+    )
+    assert results[0].abstained is None
+    assert judge.prompts == []
+    summary = summarize(results)
+    assert summary["n_abstention_scored"] == 0
+    assert summary["n_abstention_errors"] == 0
+    assert summary["abstention_rate_on_negative"] is None
