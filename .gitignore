@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Data artifacts (rebuilt via `finsight ingest`)
+data/chroma/
+data/index/
+
+# Local evaluation answers and reports may contain private corpus material.
+reports/
+
+# Environment
+.env
+
+# macOS
+.DS_Store
+
+# Build + agent tooling
+node_modules
+node_modules/
+dist/
+.claude/

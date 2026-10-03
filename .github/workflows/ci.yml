@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+        extras: ["", "--extra all"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv sync --frozen ${{ matrix.extras }}
+      - name: Lint
+        run: uv run --frozen --no-sync ruff check .
+      - name: Type check
+        run: uv run --frozen --no-sync mypy src
+      - name: Test
+        run: uv run --frozen --no-sync pytest -q

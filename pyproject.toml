@@ -1,0 +1,75 @@
+[project]
+name = "finsight"
+version = "0.4.2"
+description = "Financial research agent: adaptive RAG with hybrid retrieval, self-verification, and an evaluation harness"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "wif1c0ldspot" }]
+dependencies = [
+    "langgraph>=0.2.60",
+    "langchain-core>=0.3.0",
+    "langchain-ollama>=0.2.0",
+    "chromadb>=0.5.20",
+    "rank-bm25>=0.2.2",
+    "mcp>=1.2.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "typer>=0.13.0",
+    "rich>=13.9.0",
+    "fastmcp>=4.0.2",
+]
+
+[project.optional-dependencies]
+# Hosted chat backends. The base install stays offline (Ollama only).
+openai = ["langchain-openai>=0.3.0"]
+anthropic = ["langchain-anthropic>=0.3.0"]
+all = ["langchain-openai>=0.3.0", "langchain-anthropic>=0.3.0"]
+
+[project.urls]
+Homepage = "https://github.com/wif1c0ldspot/finsight"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+]
+
+[project.scripts]
+finsight = "finsight.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/finsight"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[[tool.mypy.overrides]]
+module = [
+    "chromadb.*",
+    "mcp.*",
+    "rank_bm25.*",
+    "langchain_ollama.*",
+    "langchain_openai.*",
+    "langchain_anthropic.*",
+    "langchain_core.*",
+    "langgraph.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
