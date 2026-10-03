@@ -38,6 +38,7 @@ def build_chat_model(
     temperature: float,
     timeout_s: float,
     max_retries: int,
+    max_output_tokens: int | None = None,
 ) -> BaseChatModel:
     """Construct a chat model for any supported provider.
 
@@ -60,6 +61,7 @@ def build_chat_model(
             temperature=temperature,
             # ChatOllama takes client options via client_kwargs, not timeout=.
             client_kwargs={"timeout": timeout_s},
+            num_predict=max_output_tokens,
         )
 
     if provider == "anthropic":
@@ -74,6 +76,8 @@ def build_chat_model(
             "timeout": timeout_s,
             "max_retries": max_retries,
         }
+        if max_output_tokens is not None:
+            anthropic_kwargs["max_tokens"] = max_output_tokens
         if base_url:
             anthropic_kwargs["base_url"] = base_url
         if api_key:
@@ -93,6 +97,8 @@ def build_chat_model(
         "timeout": timeout_s,
         "max_retries": max_retries,
     }
+    if max_output_tokens is not None:
+        openai_kwargs["max_completion_tokens"] = max_output_tokens
     if base_url:
         openai_kwargs["base_url"] = base_url
     if api_key:
@@ -110,6 +116,7 @@ def build_llm(settings: Settings) -> BaseChatModel:
         temperature=settings.llm_temperature,
         timeout_s=settings.llm_timeout_s,
         max_retries=settings.llm_max_retries,
+        max_output_tokens=settings.llm_max_output_tokens,
     )
 
 
@@ -128,6 +135,7 @@ def build_judge(settings: Settings) -> BaseChatModel:
         temperature=0.0,
         timeout_s=settings.llm_timeout_s,
         max_retries=settings.llm_max_retries,
+        max_output_tokens=settings.llm_max_output_tokens,
     )
 
 

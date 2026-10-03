@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import weakref
 from typing import Any
 
 import chromadb
@@ -16,11 +17,11 @@ from finsight.rag.index import (
     IndexIntegrityError,
     IndexMissingError,
     chunks_path,
-    read_manifest,
     validate_manifest,
 )
 from finsight.rag.ingest import chunk_from_dict, tokenize
-from finsight.rag.models import Chunk, RetrievedChunk
+from finsight.rag.lifecycle import lease_current_generation
+from finsight.rag.models import Chunk, RetrievalFilter, RetrievedChunk
 
 _RRF_K = 60
 
@@ -51,8 +52,17 @@ class HybridRetriever:
         embeddings: Embeddings | None = None,
     ) -> None:
         self._settings = settings
+        self._manifest, lease = lease_current_generation(settings.index_dir)
+        self._lease_finalizer = weakref.finalize(self, lease.close)
+        try:
+            self._initialize(settings, collection=collection, embeddings=embeddings)
+        except BaseException:
+            self.close()
+            raise
 
-        self._manifest = read_manifest(settings.index_dir)
+    def _initialize(
+        self, settings: Settings, *, collection: Any | None, embeddings: Embeddings | None
+    ) -> None:
         registry = chunks_path(settings.index_dir, self._manifest.generation)
         if not registry.exists():
             raise IndexMissingError(
@@ -79,6 +89,7 @@ class HybridRetriever:
             embed_provider=settings.embed_provider,
             embed_model=settings.embed_model,
             embed_base_url=settings.resolved_embed_base_url(),
+            embed_revision=settings.embed_revision,
         )
 
         # BM25 cannot initialize an empty vocabulary. Such corpora are still
@@ -89,6 +100,34 @@ class HybridRetriever:
         self._collection = collection if collection is not None else self._load_chroma()
         self._embeddings = embeddings if embeddings is not None else build_embeddings(settings)
         self._validate_collection_ids()
+
+    def close(self) -> None:
+        """Release the local generation lease; further retrieval is disallowed."""
+        self._lease_finalizer()
+
+    def __enter__(self) -> HybridRetriever:
+        if not self._lease_finalizer.alive:
+            raise RuntimeError("Retriever is closed")
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def embedding_cache(self) -> dict[str, list[float]]:
+        """Copy validated generation vectors keyed by identical source text."""
+        if not self._lease_finalizer.alive:
+            raise RuntimeError("Retriever is closed")
+        data = self._collection.get(include=["embeddings"])
+        vectors = data.get("embeddings")
+        if vectors is None or len(data["ids"]) != len(vectors):
+            raise IndexIntegrityError("Cached embeddings are incomplete. Re-run: finsight ingest")
+        by_id = {chunk.chunk_id: chunk for chunk in self._chunks}
+        if set(data["ids"]) != set(by_id):
+            raise IndexIntegrityError("Cached embedding IDs differ. Re-run: finsight ingest")
+        return {
+            by_id[cid].text: [float(value) for value in vector]
+            for cid, vector in zip(data["ids"], vectors, strict=True)
+        }
 
     def _load_chroma(self) -> Any:
         client = chromadb.PersistentClient(path=str(self._settings.chroma_dir))
@@ -137,20 +176,36 @@ class HybridRetriever:
     def chunk_count(self) -> int:
         return len(self._chunks)
 
-    def retrieve(self, query: str, top_k: int | None = None) -> list[RetrievedChunk]:
+    def retrieve(
+        self, query: str, top_k: int | None = None, *, filters: RetrievalFilter | None = None
+    ) -> list[RetrievedChunk]:
         """Return the top-k chunks for ``query`` via hybrid RRF fusion."""
+        if not self._lease_finalizer.alive:
+            raise RuntimeError("Retriever is closed")
         query = validate_query(query)
         k = self._settings.retrieval_top_k if top_k is None else top_k
         if type(k) is not int or k <= 0:
             raise ValueError("top_k must be a positive integer")
-        cand = min(self.chunk_count, max(self._settings.retrieval_candidates, k))
-        vector_hits = self._vector_search(query, cand)
-        bm25_hits = self._bm25_search(query, cand)
+        eligible = (
+            self._chunks if filters is None else [c for c in self._chunks if filters.matches(c)]
+        )
+        if not eligible:
+            return []
+        cand = min(len(eligible), max(self._settings.retrieval_candidates, k))
+        if filters is None:
+            vector_hits = self._vector_search(query, cand)
+            bm25_hits = self._bm25_search(query, cand)
+        else:
+            vector_hits = self._vector_search(query, cand, {c.doc_id for c in eligible})
+            bm25_hits = self._bm25_search(query, cand, {c.chunk_id for c in eligible})
         return self._rrf_fuse(vector_hits, bm25_hits, k)
 
-    def _vector_search(self, query: str, k: int) -> list[tuple[str, float]]:
+    def _vector_search(
+        self, query: str, k: int, doc_ids: set[str] | None = None
+    ) -> list[tuple[str, float]]:
         qvec = self._embeddings.embed_query(query)
-        res = self._collection.query(query_embeddings=[qvec], n_results=k)
+        options = {} if doc_ids is None else {"where": {"doc_id": {"$in": sorted(doc_ids)}}}
+        res = self._collection.query(query_embeddings=[qvec], n_results=k, **options)
         ids = list(res.get("ids", [[]])[0])
         distances = res.get("distances")
         if distances is None:
@@ -160,7 +215,9 @@ class HybridRetriever:
         # cosine distance -> similarity
         return [(cid, 1.0 - float(dist)) for cid, dist in zip(ids, distances[0], strict=True)]
 
-    def _bm25_search(self, query: str, k: int) -> list[tuple[str, float]]:
+    def _bm25_search(
+        self, query: str, k: int, chunk_ids: set[str] | None = None
+    ) -> list[tuple[str, float]]:
         if self._bm25 is None:
             return []
         terms = set(tokenize(query))
@@ -173,7 +230,8 @@ class HybridRetriever:
                 for c, score, frequencies in zip(
                     self._chunks, scores, self._bm25.doc_freqs, strict=True
                 )
-                if terms.intersection(frequencies)
+                if (chunk_ids is None or c.chunk_id in chunk_ids)
+                and terms.intersection(frequencies)
             ),
             key=lambda kv: kv[1],
             reverse=True,

@@ -19,6 +19,8 @@ from typing import TypeVar
 from langchain_core.language_models.chat_models import BaseChatModel
 from pydantic import BaseModel, ValidationError
 
+from finsight.runtime import RunLimitError
+
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 _FENCED = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
@@ -103,6 +105,8 @@ def invoke_structured(
             return result
         if isinstance(result, dict):
             return schema.model_validate(result)
+    except RunLimitError:
+        raise
     except NotImplementedError:
         pass
     except Exception:  # provider-specific tool errors; fall through to text parsing

@@ -1,6 +1,6 @@
 """Typed state shared across agent-graph nodes."""
 
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from finsight.rag.models import RetrievedChunk
 
@@ -39,8 +39,16 @@ class AgentState(TypedDict, total=False):
     context_citations: dict[int, RetrievedChunk]
     context_text: str
     no_evidence: bool
+    rerank_applied: bool
+    rerank_note: str
+    semantic_supported: bool | None
+    semantic_checked_segments: int
+    semantic_unsupported_segments: list[int]
 
     # grounding
     grounded: bool
     dangling_citations: list[int]
     grounding_note: str
+
+    # Sanitized per-invocation controls and telemetry, supplied by AgentRunner.
+    runtime: dict[str, Any]

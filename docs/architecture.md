@@ -1,129 +1,172 @@
 # Architecture
 
-Finsight is a single-turn research agent over a local Markdown corpus. The CLI
-coordinates ingestion, the agent graph, evaluation, and an MCP client demo.
-Factories in `llm.py` isolate provider construction; graph nodes accept injected
-models and retrieval functions for offline testing.
+Finsight is a single-turn local research agent. LangGraph coordinates retrieval,
+verification, reformulation, answer generation and grading. Provider factories
+separate chat, embeddings and evaluation judges. Dependencies accept injected
+models/retrievers so tests can verify behavior without live providers.
 
-## Index lifecycle
+The supported storage boundary is macOS/Linux on a local POSIX filesystem. The
+chunk registry, BM25 index and reuse cache are memory-resident. This is a small-corpus
+POC, not a distributed ingestion or multi-tenant service.
 
-Ingestion splits paragraphs into overlapping, character-bounded chunks and
-embeds them. Every build writes a new Chroma collection and a generation-specific
-JSON registry. After validating the new collection, it atomically replaces the
-version 3 manifest that identifies the published generation. The manifest binds
-the logical collection, embedding provider/model/endpoint hash, chunk IDs, and a
-content hash. The raw embedding endpoint is not stored. An endpoint change
-requires rebuilding even if the model alias stays the same; changes behind an
-unchanged alias still require an operator-initiated rebuild.
+## Source records and retrieval
 
-Embedding and Chroma insertion run in batches bounded by both a 128-chunk cap and
-the Chroma client's maximum batch size. This bounds each request by document
-count, not tokens. The registry and BM25 index still reside in memory, so this is
-a small-corpus design rather than a distributed ingestion system.
+Markdown files may have adjacent `.metadata.json` sidecars containing `source_url`,
+`published_at`, `retrieved_at` and `revision`. Missing dates are not inferred;
+publication dates use ISO calendar dates. Without an explicit revision, ingestion
+hashes the local Markdown text. This identifies the summary, not an archived copy
+of the publisher's complete page. The bundled 11 historical source summaries and
+40 authored cases are documented in [dataset.md](dataset.md).
 
-A failed build leaves the previous generation available. Changing embedding
-dimensions creates a fresh collection rather than deleting live data. Existing
-readers remain bound to their generation; the MCP server checks the manifest on
-search and reloads when a new generation is published. Old generations are kept
-for active readers; automatic garbage collection is not implemented. Interrupted
-builds may also retain unpublished collections. Version 1 and 2 indexes require
-rebuilding with `finsight ingest`.
+Metadata flows through chunks, search payloads, prompts and CLI source display.
+`RetrievalFilter` combines fields with AND and list values with OR. Source URLs are
+exact matches; publication bounds are inclusive and exclude undated chunks. Empty
+filter lists match nothing. Dense candidate selection and sparse candidate scoring
+use the same filter scope before reciprocal-rank fusion.
 
-Retrieval combines dense vector ranks with BM25 ranks using reciprocal-rank
-fusion. Documents without lexical matches do not receive a sparse-rank bonus.
-Original component scores remain attached to results for inspection.
-When the ASCII sparse tokenizer finds no terms in the entire corpus, retrieval
-uses dense vectors alone. Mixed corpora still use BM25 for chunks with matching
-ASCII terms, without giving tokenless chunks a sparse-rank bonus.
-Queries are validated before embedding calls. Candidate pools expand to cover a
-requested `top_k` and are capped by corpus size. Registry decoding/schema failures
-raise an integrity error with rebuild guidance.
+Unicode-aware BM25 tokenization covers letters/numbers across scripts and supports
+Han-character matching in unsegmented CJK text. It is not a language-specific
+morphological tokenizer. Corpora with no usable tokens fall back to dense search;
+queries without lexical matches receive no arbitrary BM25 rank bonus. RRF combines
+ranks while retaining original component scores for inspection.
 
-## Agent graph and evidence
+Optional LLM reranking retrieves a larger bounded pool, requires an exact permutation
+of displayed reference IDs, and falls back to original RRF ordering on malformed
+rankings. It is off by default pending measured benefit. No cross-encoder or
+empirical improvement is claimed.
 
-The graph retrieves, verifies context sufficiency, and answers. Failed verification
-or citation validation can trigger reformulation within the configured retry
-budget. Reformulation receives prior queries and verification/grounding feedback.
-An empty, overlong or repeated rewrite stops further retrieval and completes the
-answer path. The graph's step limit is derived from the configured retry budget.
-Ungrounded final answers carry a citation warning when enforcement is on. If no
-source chunk fits the answer context, the graph returns a deterministic abstention
-without an answer-generation call or a misleading citation warning.
+## Index generations and reclamation
 
-Context rendering enforces its character limit across the entire block, including
-any omission marker. Whole chunks that do not fit are excluded, including an
-oversized first chunk. References keep their original retrieval numbers, so gaps
-are possible. The renderer returns both text and an explicit citation map.
-Generation, grounding validation, CLI source display, and evaluation use that
-same evidence map; omitted chunks cannot validate a citation.
+Ingestion creates a fresh Chroma collection and generation-specific registry,
+validates their contents, then atomically publishes a v4 manifest. It binds logical
+collection, embedding provider/model, endpoint hash, optional embedding revision,
+chunk IDs and content hash. Raw endpoint URLs and credentials are not stored.
+Versions 1–3 require an `ingest` rebuild.
 
-Citation validation checks reference existence, not whether every claim follows
-from its source. PII output redaction is heuristic. Neither constitutes a general
-prompt-injection defense or a guarantee of factual correctness.
-Bare eight-digit values remain intact because they can represent financial
-amounts; phone redaction requires a recognizable label or an explicit `+65` prefix.
+Compatible previous generations provide a chunk-text-to-vector cache. Unchanged
+text can reuse embeddings even when its provenance changes; the new registry
+records current metadata. Changed text is embedded in bounded batches, capped by
+128 chunks and Chroma's batch limit. Removed chunks disappear from the new generation.
+A dimension change or incompatible manifest produces a fresh collection, preserving
+the published generation if rebuilding fails.
 
-## Provider and MCP boundaries
+`embed_revision` is operator-supplied identity metadata, not automatic verification
+of provider weights. An unchanged alias can change meaning. Update the revision or
+use `ingest --full` to bypass reuse after such a change. This caveat applies even
+when endpoint and model strings stay the same.
 
-The answering model, embeddings, and evaluation judge use centralized factories.
-The default judge inherits the answering endpoint when using the same provider;
-an OpenAI-compatible judge must have a resolved endpoint. Chat and embedding
-requests have finite timeout settings. Hosted embeddings use a bounded retry
-budget; Ollama embedding requests make one attempt.
-Settings reject nonfinite timeouts, invalid counts and overlap that cannot progress
-through a chunk. Total service time and cost remain operator-controlled: there is
-no run-wide deadline, cancellation API, quota or token budget.
+POSIX `flock` leases protect active readers and builders. Lifecycle locking
+coordinates lease acquisition, publication and cleanup. Readers remain attached
+to their immutable generation; MCP search observes a new manifest on the next
+request. Explicit `index-cleanup` is dry-run by default. `--apply` deletes only
+owned, inactive generations older than the requested age floor and outside the
+retained newest set. The published generation is always protected; unmarked
+artifacts are never guessed to be safe. Failed managed builds become eligible
+only after their lease is released. This is not a network-filesystem/distributed
+lease protocol or an automatic storage quota.
 
-The graph uses the shared MCP tool functions in-process by default. External
-clients can use the same tools through stdio or HTTP. The included stdio client
-explicitly forwards Finsight settings and supported provider credentials. Tool
-failures raise `MCPToolError`, rather than masquerading as successful text.
-Finsight environment names are forwarded case-insensitively, matching Settings.
-MCP inputs are strict: invalid queries or nonpositive/noninteger search limits fail
-before lazy index initialization. Omitting `top_k` uses the configured default.
-`doctor` checks local answering and embedding endpoints independently, reports
-HTTP failures, and labels hosted providers as unprobed rather than claiming they
-are healthy without an authenticated request.
+## Graph and evidence contract
 
-The HTTP transport has no authentication or user isolation. Keep this local unless
-an authenticated boundary and resource limits are added. Graph retrieval uses the
-shared Python tool implementation, not a network round trip or model-selected tool
-call; the standalone stdio demo exercises the actual MCP transport separately.
+The graph retrieves, optionally reranks, verifies context sufficiency, answers and
+grades. Failed sufficiency or grounding can trigger bounded reformulation. Rewrite
+prompts include previous queries and failure feedback; empty, repeated or overlong
+queries terminate retries. Graph step limits account for the configured retry
+budget and optional nodes.
 
-## Evaluation and validation
+A context renderer returns both bounded text and its reference-to-chunk map.
+Whole chunks that cannot fit are omitted, including an oversized first chunk.
+Provenance and omission markers count against the budget. Reference gaps are valid.
+Generation, citation checks, source display and faithfulness evaluation share this
+map; an omitted chunk cannot validate a citation. With no usable evidence, the
+agent returns a deterministic abstention without answer generation.
 
-Golden-set evaluation measures retrieval recall, reciprocal rank, document-level
-nDCG, citation validity, and model-judged faithfulness/correctness. Repeated chunks
-from one relevant document receive relevance credit only once in nDCG. The judge
-sees the same bounded evidence used for the answer. Negative cases receive a typed
-judge verdict checking both refusal and the absence of a substantive or guessed
-answer. Empty answers fail; malformed verdicts remain unscored. The summary shows
-the eligible, scored, and error counts alongside the abstention rate, so exclusions
-are visible. The legacy phrase-match helper is not used for headline metrics.
-These small golden sets demonstrate behavior, not statistical quality; the judge
-can still make mistakes even when its output satisfies the schema.
+Character bounds always apply. Optional chunk/context token bounds use an injected
+exact content counter when supplied, otherwise UTF-8 content bytes. That fallback
+conservatively bounds byte-based tokenization of the content, excluding provider
+framing/tool overhead; it is not a universal model-window calculation. The chunker
+clips overlap when needed to preserve forward progress under a smaller budget.
 
-The harness validates golden-set types and identities before constructing models.
-It isolates agent failures per case and judge failures per metric, preserving the
-remaining run. Failures retain sanitized exception types, never exception messages
-that may contain credentials. Missing retrieval labels and unavailable metric
-verdicts remain unscored with visible denominators. Empty reference-bearing answers
-score zero correctness; missing references do not receive correctness credit.
+Default grading checks citation existence. Optional semantic grading segments the
+answer deterministically and requests one typed support verdict for every segment,
+using only that segment's cited sources, including provenance. Missing citations,
+invalid/partial verdicts or excess segment coverage fail the check. Persistent
+semantic failure ends in abstention after the retry policy, rather than releasing
+the rejected answer. This model judgment remains fallible; adversarial fixtures
+and instructions to ignore embedded commands are not a general injection defense.
+PII output redaction is also heuristic and preserves unlabelled financial amounts.
 
-`evaluate --output PATH` writes a versioned JSON report with every result and
-summary, allowlisted settings, model identities, endpoint hashes, and before/after
-golden/index provenance. It flags observed mutations but does not freeze external
-data or model revisions. Reports are written at the end of a run, not incrementally;
-process termination can still lose an unfinished run. Operational errors produce
-a nonzero CLI exit after saving; malformed judge verdicts are metric errors visible
-in the summary. Both coverage and scores must be checked before claiming quality.
+## Runtime and provider boundaries
 
-Regression tests exercise graph branches, context budgets, citation mappings,
-interrupted index publication, embedding dimension changes, live retriever reload,
-provider configuration, and real MCP stdio calls using temporary corpora. CI runs
-both the base installation and hosted-provider extras on supported Python
-3.11–3.13, with Ruff and strict mypy. Models are replaced with deterministic doubles;
-live-model quality and runtime characteristics remain to be evaluated.
+`AgentRunner` creates fresh accounting for each invocation. `RunContext` supports
+explicit cancellation and an injectable content counter. Node and logical model
+boundaries check deadlines, cancellation, call counts, input/output budgets and
+configured cost limits. Native structured-output calls, fallback completions and
+repair attempts consume logical calls when invoked; hidden SDK retries are not
+separate logical calls. Per-request timeouts and retry settings remain necessary.
 
-See [the readiness roadmap](learning-plan.md) for the remaining scope and acceptance
-criteria. Production service operation is outside the current POC boundary.
+Cancellation and timeouts are cooperative: arbitrary synchronous provider or
+retrieval work cannot be preempted. A run can exceed its wall-clock target while a
+call completes, then stop at the next boundary. Output caps are passed to supported
+provider clients, but actual accounting is reconciled after responses and does not
+guarantee that a provider cannot exceed a requested budget.
+
+Budget counts and provider-reported tokens are tracked separately. Tool arguments
+are included in content accounting. Cost fields require explicitly configured
+input/output rates; complete reported-usage cost estimates remain unavailable when
+usage is missing. These are agent-chat estimates, excluding embeddings, separate
+evaluation judges and hidden provider retries, not account-level billing quotas.
+
+Sanitized traces retain fixed statuses, node/model elapsed times, counts and cost
+estimates without prompts, source text, response bodies, endpoint URLs or credentials.
+Failure summaries survive runtime exceptions. Evaluation stores this agent trace
+alongside case results; its runtime figures do not measure separate judge work.
+
+Provider factories preserve configured endpoints, including the inherited judge
+endpoint, and enforce finite request timeouts. Compatible backends require explicit
+URLs. `doctor` checks local endpoint reachability; hosted services are not declared
+healthy without an authenticated model request.
+
+## MCP boundary
+
+The graph calls shared retrieval functions in-process by default. FastMCP exposes
+the same functions through stdio or a local HTTP demonstration. Search validates
+queries, limits and filters before lazy index creation. `get_document_record`
+returns document text and provenance; legacy `get_document` returns text. Listing
+and getting reflect current corpus files, while search reflects the published index.
+
+The included stdio client forwards supported environment configuration and preserves
+MCP error semantics. HTTP does not implement authentication, authorization, tenant
+isolation, TLS termination or quotas. None of the local runtime controls establishes
+a secure remote service boundary.
+
+## Evaluation persistence and comparison
+
+The harness validates the complete golden set before constructing models. Category
+and `development`/`held_out` filters select a cohort. Agent failures are isolated per
+case, judge failures per metric; sanitized exception types and scored denominators
+remain visible. Malformed verdicts are unscored. Empty answers fail abstention and
+reference correctness. nDCG grants each relevant document credit once despite
+multiple returned chunks. Citation validity and semantic factual support are distinct.
+
+Atomic checkpoints are saved before setup and after each fully processed case using
+a flushed temporary file and replacement. An interrupted case is absent from the
+checkpoint and reruns. Resume requires matching golden/model/config/index and runtime
+version fingerprints and the same selection flags. Completed records are retained;
+`--retry-failures` explicitly reruns operational or schema errors, not merely low
+scores. Reports expose selected/completed/scored counts overall and by category.
+
+Reports allowlist configuration, hash endpoint URLs, and record before/after input
+provenance. A disappeared golden file does not discard completed results. Reports
+contain questions and answers despite sanitized operational fields and should be
+treated as potentially private artifacts.
+
+Comparison requires matching golden/index-content hashes and selected IDs. Deltas
+are computed separately for each metric on the intersection of scored case IDs;
+paired means/counts/IDs accompany independent aggregates, coverage and errors.
+No matched cases means no delta. Model/config differences are labelled, and neither
+statistical significance nor an acceptance threshold is inferred.
+
+The public 20/20 split is an authored fixture partition, not independent benchmark
+data. Automated checks establish software behavior; live quality, latency, cost and
+hardware evaluation are explicitly deferred. Human adjudication and independently
+collected labels remain gates for stronger claims.

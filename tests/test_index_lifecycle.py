@@ -128,7 +128,7 @@ def test_invalid_chunking_settings_fail_fast(size, overlap):
         ingest._split_text("text", size, overlap)
 
 
-@pytest.mark.parametrize("text,query", [("公司利润增长", "利润"), ("!!! ??? ...", "!!!")])
+@pytest.mark.parametrize("text,query", [("!!! ??? ...", "!!!")])
 def test_empty_sparse_vocabulary_uses_dense_retrieval(indexed, text, query):
     settings, embeddings = indexed
     (settings.corpus_dir / "a.md").write_text(text, encoding="utf-8")
@@ -154,7 +154,7 @@ def test_mixed_sparse_vocabulary_preserves_matching_chunks(indexed):
     assert "bm25" in results[0].component_scores
     assert results[1].component_scores == {"vector": 1.0}
     assert retriever._bm25_search("absenttoken", 4) == []
-    assert retriever._bm25_search("利润", 4) == []
+    assert retriever._bm25_search("利润", 4)[0][0] == "a:0"
 
 
 @pytest.mark.parametrize(

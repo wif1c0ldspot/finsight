@@ -138,7 +138,7 @@ def test_settings_drive_the_collection_name():
     assert Settings().collection_name == "finsight"
 
 
-@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("version", [1, 2, 3])
 def test_manifest_without_endpoint_identity_requires_rebuild(tmp_path, version):
     _write(tmp_path, _chunks("a:0"))
     path = tmp_path / "manifest.json"
