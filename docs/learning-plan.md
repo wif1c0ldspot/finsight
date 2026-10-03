@@ -1,99 +1,107 @@
-# Learning & Refinement Plan
+# Readiness & Development Roadmap
 
-**Goal:** build the skillset to land — and justify — a senior/lead agentic-AI
-engineering role at market rate, backed by a portfolio artifact that proves it.
+## Current objective and release boundary
 
-## The core idea
+Finsight demonstrates a single-turn research agent over a local Markdown corpus:
+hybrid retrieval, bounded reformulation, citation checks, a shared MCP tool surface,
+and measurable evaluation. The implementation supports that POC objective.
 
-Frameworks are a checkbox; **engineering depth is the moat.** In a hot AI
-market everyone lists "LangChain / RAG / MCP" on their resume, so those alone
-won't get you to the top of a band. What separates a market-rate engineer from
-a "prompt engineer" is the ability to ship production systems: retrieval that
-can be measured, agents that can be verified, and code that can be tested.
+The public repository is intended for local experimentation and evaluation.
+Automated verification covers code paths and failure handling with model doubles,
+real local Chroma collections, and MCP stdio subprocesses. It does not establish
+answer accuracy, live provider compatibility, latency or hardware requirements.
+Live-model testing has been deferred; no live benchmark score is claimed.
 
-Finsight is built so that **each concept has a home in the codebase.** Learn
-the concept, then *refine the corresponding module* to prove you understand it
-below the API surface. Learning by extension, not by tutorial.
+## Stability work implemented
 
-## Skill map
+- Atomic index generations keep the working index available when a later batch
+  fails. Bounded embedding/write batches respect Chroma limits. Manifests bind
+  provider, model, endpoint, content and generation; malformed registries fail
+  with rebuild guidance.
+- Configuration and tool boundaries reject invalid counts, queries and nonfinite
+  timeouts. Search limits expand the candidate pool consistently. MCP uses strict
+  request types and reloads the published generation.
+- Graph retries respect the configured budget. Empty, repeated or overlong
+  rewrites terminate cleanly; an answer without usable evidence is a deterministic
+  abstention. All citation consumers share the bounded evidence map.
+- Evaluation validates inputs, isolates failures, exposes scoring denominators,
+  saves versioned JSON reports, and reports operational failures with a nonzero
+  exit after saving results.
+- Public setup instructions distinguish code verification from model evaluation.
+  CI covers base and hosted extras across the declared Python versions.
 
-| Concept | What it actually is | Where in finsight | How to deepen it |
-|---|---|---|---|
-| **SWE fundamentals** | typing, testing, packaging, CI | `pyproject`, mypy strict, pytest, GitHub Actions | property-based tests (`hypothesis`), Docker, async runtime |
-| **Agentic orchestration** | stateful graphs, conditional edges, reflection loops | `graph/` (retrieve→verify→reformulate→answer) | checkpointing, streaming, human-in-the-loop |
-| **RAG** | chunking, embeddings, hybrid retrieval, fusion | `rag/` (Chroma + BM25 + RRF) | reranking, query expansion/HyDE, multimodal |
-| **Evaluation** | recall, faithfulness, LLM-as-judge | `eval/` | answer-correctness vs ground truth, Ragas metrics |
-| **MCP** | a protocol for exposing tools to agents | `mcp/` (server + client) | wire tools *into* the graph (`langchain-mcp-adapters`) |
-| **Guardrails** | PII, citation enforcement, input validation | `guardrails/` | prompt-injection detection, structured-output validation |
-| **Observability** | traces, latency, token cost | `observability/` | OpenTelemetry/LangSmith, token-cost tracking |
-| **Vector search** | embeddings, ANN indexes, distance metrics | `rag/` (Chroma cosine) | benchmark Chroma vs Qdrant/pgvector, tune HNSW |
-| **LLM engineering** | prompting, temperature, structured output | `graph/nodes.py` | JSON-mode output, tool/function calling |
-| **A2A** | agent-to-agent interoperability | *(not yet)* | a two-agent delegation demo |
+## Next release gate: live evaluation evidence
 
-## Phased roadmap
+This is the first priority before claiming demonstrated answer quality.
 
-*Each phase is a PR-sized slice: build it, measure it, then move on.*
+1. On a machine with a configured model service, run `uv run finsight doctor`, then
+   `uv run finsight ingest`. Record the model revisions and hardware outside the report
+   if the provider only exposes mutable model aliases.
+2. Run representative `uv run finsight ask` questions and `uv run finsight mcp-demo`
+   through the installed CLI. Verify citations against source text, including an
+   unanswerable question and a question that needs reformulation.
+3. Choose a separately configured judge where possible. Run
+   `uv run finsight evaluate --output reports/baseline.json` on unchanged input data.
+4. Inspect operational and metric errors and the scored denominators before the
+   averages. Repeat failed cases after fixing their cause. Manually review model
+   and judge outputs; a successful command is not an accuracy threshold.
+5. Record observed latency and memory use, preserve the configuration and data
+   hashes, and compare repeated runs before publishing benchmark claims. Choose
+   quality thresholds based on the intended use case rather than inventing them
+   from this nine-case fixture.
 
-### Phase 1 — Retrieval quality (this is where most RAG value is)
-- Add a **reranker** (cross-encoder or LLM rerank) after RRF; measure
-  `recall@k` before/after on the golden set.
-- Add **query expansion / HyDE** and see if it helps recall on the "hard"
-  questions.
-- Expand the golden set with questions that *require* hybrid (lexical-heavy)
-  vs dense (semantic) retrieval, and report recall per category.
+The bundled five company summaries and nine golden cases are a smoke-test dataset.
+They have no maintained source/date provenance and are insufficient for statistical
+claims or current financial research.
 
-### Phase 2 — Productionisation
-- **Async + streaming**: stream tokens from the answer node; run verify in
-  parallel where possible.
-- **Checkpointing + human-in-the-loop**: persist graph state (SQLite/Postgres
-  checkpointer) and add an `approve` node before answering.
-- **Containerise**: `docker-compose` with Chroma + Ollama + the agent.
-- **OpenTelemetry**: replace the stdlib collector with real spans/traces.
+## Architecture work still needed
 
-### Phase 3 — Agent tool-use
-- Wire the MCP `search_documents` / `get_document` tools into the graph as a
-  `ToolNode` (via `langchain-mcp-adapters`), so the LLM decides *when* to
-  retrieve, not just *what*.
-- Add a **calculator / formula** tool to demonstrate mixed tool-use and
-  structured tool schemas.
+### Evidence quality and retrieval
 
-### Phase 4 — Multi-agent & A2A
-- Split into a **researcher agent** + **writer agent** that pass a structured
-  handoff (draft → critique → revise).
-- Prototype an **A2A** exchange between two agents.
+- **Source provenance and freshness:** introduce source URLs, publication and
+  retrieval dates, document revisions and metadata filters. Acceptance: every
+  presented fact can be traced to a dated source and filtered by intended scope.
+- **Larger evaluation set:** add held-out, multi-document, numerical, misleading,
+  unanswerable and adversarial cases with reviewed labels. Acceptance: report
+  category scores, error coverage and repeatability with a documented dataset.
+- **Semantic claim support:** assess whether cited passages support each claim.
+  Existing citation validation only checks reference existence. Acceptance:
+  deliberately misattributed claims are detected on a reviewed test set.
+- **Token budgets and reranking:** measure tokenizer-aware chunk/context limits and
+  a reranker against the saved baseline. Acceptance: improved retrieval/answer
+  quality with documented latency and cost; adoption depends on measured benefit.
+- **Multilingual sparse retrieval:** replace or supplement the ASCII tokenizer
+  when the corpus requires it. Acceptance: lexical matches work for the supported
+  languages without degrading the current corpus.
 
-## Refinement exercises (pick one per session)
+### Storage and resource management
 
-1. Add a reranker and report the recall delta.
-2. Compare the custom chunker against `RecursiveCharacterTextSplitter` and a
-   semantic splitter — benchmark chunk count, retrieval recall, faithfulness.
-3. Add a checkpointer + an `approve` (HITL) node.
-4. Add answer-correctness evaluation (LLM judge vs `ground_truth`) and a
-   combined quality score.
-5. Wire MCP tools into the graph.
-6. Add prompt-injection classification to the input guardrail.
-7. Track token cost + per-node latency and print a budget report.
-8. Swap the LLM to a different Ollama model and re-run eval — measure the
-   quality/latency tradeoff.
+- **Generation cleanup and incremental indexing:** safely reclaim old and failed
+  generations after readers release them; update changed documents without full
+  re-embedding. Acceptance: reader safety, bounded disk growth and recovery tests.
+- **Model identity:** endpoint/model names do not identify immutable weights.
+  Record provider model revisions where available and define a rebuild policy.
+- **Resource controls:** add run-wide deadlines, cancellation, token/cost budgets
+  and capacity limits. Current call timeouts and retry counts do not impose a total
+  time or cost ceiling. Acceptance: cancellation and exhaustion terminate cleanly
+  with preserved results under injected delays and failures.
+- **Observability and resumable evaluation:** add per-node timings, token usage,
+  structured traces and incremental report checkpoints. Current reports survive
+  case errors but are only written at run completion.
 
-## Resources (high-signal, stable)
+### Required only before a remotely hosted service
 
-- LangGraph concepts: <https://langchain-ai.github.io/langgraph/>
-- Model Context Protocol spec + SDK: <https://modelcontextprotocol.io>
-- Ragas metrics (faithfulness, context precision/recall): <https://docs.ragas.io>
-- Ollama: <https://ollama.com>
-- Your own agent and retrieval setups are living reference
-  implementations — read their agent loops critically against what you build here.
+- Authentication, authorization, per-user data isolation, rate limits and a
+  configured TLS boundary. The included HTTP MCP server is a local demo.
+- A threat model for untrusted documents/tools, prompt-injection tests and a
+  privacy policy appropriate to the data. Regex redaction is illustrative and
+  cannot guarantee removal of sensitive information.
+- Deployment health/readiness checks, backup/restore, concurrent-load testing,
+  operational monitoring and a documented dependency/security update process.
 
-## How to talk about it in interviews
+## Optional product extensions
 
-> "I built an agentic RAG system with a self-reflective retrieval loop — the
-> agent verifies whether its context is sufficient and reformulates the query
-> rather than blindly answering. Hybrid retrieval (dense + BM25, RRF fusion),
-> citation enforcement and PII guardrails on the output, and an eval harness
-> that reports recall and LLM-judged faithfulness. It runs fully offline on a
-> local Ollama stack."
-
-For each competency an interviewer probes, you can point at a module *and* at a
-measurement you ran against it. That — a system you built, measured, and
-refined — is what a 150K+ agentic-AI engineer looks like on paper.
+Conversation memory, checkpoints, streaming, a web UI, numerical/calculator tools,
+model-selected tool calls and multi-agent delegation are not implemented. They
+are independent extensions, not prerequisites for this single-turn local POC.
+Add them only when an evaluation case or user workflow demonstrates a need.

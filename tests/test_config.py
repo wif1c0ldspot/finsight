@@ -217,3 +217,52 @@ def test_embedding_timeout_requires_a_finite_positive_value(value):
 def test_embedding_retry_budget_cannot_be_negative():
     with pytest.raises(ValueError):
         Settings(embed_max_retries=-1)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("llm_timeout_s", "0"), ("llm_timeout_s", "-1"),
+    ("llm_timeout_s", "inf"), ("llm_timeout_s", "nan"),
+    ("embed_timeout_s", "inf"), ("llm_temperature", "nan"),
+    ("llm_max_retries", "-1"), ("embed_max_retries", "-1"),
+    ("max_retrieval_attempts", "-1"),
+    ("chunk_size", "0"), ("chunk_overlap", "-1"),
+    ("retrieval_top_k", "0"), ("retrieval_candidates", "-1"),
+    ("context_max_chars", "0"), ("retrieval_top_k", "1.5"),
+])
+def test_invalid_runtime_environment_fails_at_configuration(monkeypatch, field, value):
+    monkeypatch.setenv(f"FINSIGHT_{field.upper()}", value)
+    with pytest.raises(ValueError):
+        Settings(_env_file=None)
+
+
+@pytest.mark.parametrize("overlap", [600, 601])
+def test_overlap_must_leave_room_for_progress(overlap):
+    with pytest.raises(ValueError, match="chunk_overlap must be smaller"):
+        Settings(chunk_size=600, chunk_overlap=overlap)
+
+
+def test_zero_retry_budgets_and_overlap_are_supported():
+    settings = Settings(llm_max_retries=0, embed_max_retries=0,
+                        max_retrieval_attempts=0, chunk_overlap=0)
+    assert settings.max_retrieval_attempts == 0
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"judge_provider": "openai"},
+    {"judge_base_url": "http://other:11434"},
+    {"judge_model": "other-model"},
+])
+def test_self_grading_caveat_requires_same_resolved_identity(kwargs):
+    assert not Settings(**kwargs).judge_is_same_model
+
+
+def test_self_grading_uses_resolved_endpoint_and_ignores_trailing_slash():
+    settings = Settings(llm_base_url="http://answer:11434/",
+                        judge_base_url="http://answer:11434")
+    assert settings.judge_is_same_model
+
+
+@pytest.mark.parametrize("field", ["retrieval_top_k", "max_retrieval_attempts", "llm_max_retries"])
+def test_boolean_counts_are_not_integers(field):
+    with pytest.raises(ValueError, match="not booleans"):
+        Settings(**{field: True})

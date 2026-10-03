@@ -26,6 +26,8 @@ from finsight.rag.index import chunks_path, write_manifest
 from finsight.rag.models import Chunk, Document
 
 _WORD = re.compile(r"[a-z0-9]+")
+# Bound provider request sizes as well as the local vector-store transaction.
+_EMBED_BATCH_SIZE = 128
 
 
 def tokenize(text: str) -> list[str]:
@@ -103,6 +105,15 @@ def chunk_to_dict(chunk: Chunk) -> dict[str, Any]:
 
 
 def chunk_from_dict(data: dict[str, Any]) -> Chunk:
+    if not isinstance(data, dict):
+        raise ValueError("Each registry chunk must be an object")
+    for key in ("chunk_id", "doc_id", "title", "text"):
+        if not isinstance(data.get(key), str):
+            raise ValueError(f"Chunk {key} must be a string")
+    if not data["chunk_id"] or not data["doc_id"]:
+        raise ValueError("Chunk identifiers must not be empty")
+    if type(data.get("position")) is not int or data["position"] < 0:
+        raise ValueError("Chunk position must be a nonnegative integer")
     return Chunk(
         chunk_id=str(data["chunk_id"]),
         doc_id=str(data["doc_id"]),
@@ -127,20 +138,24 @@ def build_index(settings: Settings) -> int:
         raise RuntimeError("Corpus produced no chunks; check chunk_size configuration.")
 
     embeddings = build_embeddings(settings)
-    vectors = embeddings.embed_documents([c.text for c in chunks])
-
     client = chromadb.PersistentClient(path=str(settings.chroma_dir))
+    batch_size = min(_EMBED_BATCH_SIZE, client.get_max_batch_size())
     generation = uuid.uuid4().hex
     physical_collection = f"generation-{generation}"
     collection = client.create_collection(
         name=physical_collection, metadata={"hnsw:space": "cosine"}
     )
-    collection.add(
-        ids=[c.chunk_id for c in chunks],
-        documents=[c.text for c in chunks],
-        metadatas=[{"doc_id": c.doc_id, "title": c.title, "position": c.position} for c in chunks],
-        embeddings=cast(Any, vectors),
-    )
+    for start in range(0, len(chunks), batch_size):
+        batch = chunks[start : start + batch_size]
+        vectors = embeddings.embed_documents([c.text for c in batch])
+        collection.add(
+            ids=[c.chunk_id for c in batch],
+            documents=[c.text for c in batch],
+            metadatas=[
+                {"doc_id": c.doc_id, "title": c.title, "position": c.position} for c in batch
+            ],
+            embeddings=cast(Any, vectors),
+        )
 
     stored = collection.get()
     if dict(zip(stored["ids"], stored["documents"] or [], strict=True)) != {
@@ -162,5 +177,6 @@ def build_index(settings: Settings) -> int:
         embed_model=settings.embed_model,
         generation=generation,
         vector_collection=physical_collection,
+        embed_base_url=settings.resolved_embed_base_url(),
     )
     return len(chunks)

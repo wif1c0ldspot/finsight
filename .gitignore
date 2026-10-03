@@ -14,6 +14,9 @@ htmlcov/
 data/chroma/
 data/index/
 
+# Local evaluation answers and reports may contain private corpus material.
+reports/
+
 # Environment
 .env
 

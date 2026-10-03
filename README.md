@@ -6,8 +6,22 @@ retrieve/reformulate cycle, and citation-checked answers with a small evaluation
 harness. The same retrieval capability is exposed as an **MCP tool server**, so other
 agents can drive it, and the agent itself consumes those tools.
 
-Runs fully offline on a local Ollama stack by default, and against OpenAI, Anthropic
-or any OpenAI-compatible endpoint by configuration.
+Runs locally on Ollama by default, and against OpenAI, Anthropic or an
+OpenAI-compatible endpoint by configuration. Local inference can run offline
+after dependencies and models have been downloaded.
+
+## Release status
+
+Finsight is a **public proof of concept for local experimentation and evaluation**.
+Automated tests cover orchestration, real local Chroma persistence, MCP stdio,
+provider construction and failure handling using deterministic model doubles.
+Live-model answer quality, latency and hardware requirements have **not yet been
+validated**. The bundled company summaries are demonstration fixtures, not a
+maintained financial dataset.
+
+Start with the sample corpus, inspect cited evidence, and save an evaluation report
+before comparing models. See the [readiness and development roadmap](docs/learning-plan.md)
+for the remaining work and the criteria for a stronger release claim.
 
 ## What it does
 
@@ -22,6 +36,10 @@ Given a question, the agent:
 5. **Grades its own grounding** — the answer must cite a real chunk and no
    non-existent ones. An ungrounded answer triggers another retrieval attempt, or is
    returned with a visible citation warning if the budget is spent.
+
+When no usable source text reaches the answer stage, it returns a deterministic
+abstention. Citation checks validate reference existence; they do not prove a
+claim is supported by the referenced text.
 
 Two decision points, both bounded by `max_retrieval_attempts`.
 
@@ -42,8 +60,10 @@ Two decision points, both bounded by `max_retrieval_attempts`.
 ## Quickstart
 
 ```bash
-# 1. Install (creates .venv with a pinned Python 3.12)
-uv sync
+# 1. Clone and install (requires uv; creates .venv with a pinned Python 3.12)
+git clone https://github.com/wif1c0ldspot/finsight.git
+cd finsight
+uv sync --frozen
 
 # 2. Ensure Ollama is running, then pull each model separately
 ollama pull qwen3:8b
@@ -59,11 +79,24 @@ uv run finsight ingest
 uv run finsight ask "Who founded Airwallex and when?"
 
 # 6. Run the evaluation
-uv run finsight evaluate
+uv run finsight evaluate --output reports/baseline.json
 
 # 7. Demo the MCP server
 uv run finsight mcp-demo "What is Stripe's core product?"
 ```
+
+Run commands from the repository root: the default corpus and golden-set paths
+are relative to it. A wheel installation alone does not include the sample data.
+For a code-only check without Ollama, credentials or model downloads:
+
+```bash
+uv run --frozen --no-sync ruff check .
+uv run --frozen --no-sync mypy src
+uv run --frozen --no-sync pytest -q
+```
+
+These checks verify software behavior, not live model accuracy. `doctor` checks
+local service reachability; it does not certify that a configured model is loaded.
 
 ## Using a hosted provider
 
@@ -101,12 +134,13 @@ export FINSIGHT_EMBED_MODEL=nomic-embed-text
 `openai_compatible` requires an explicit base URL — the settings model rejects it
 without one rather than silently talking to the wrong host.
 
-> **Changing `embed_model` invalidates the index.** The manifest records which model
-> produced the stored vectors and refuses to serve them if the setting no longer
-> matches. Re-run `finsight ingest`.
+> **Changing the embedding provider, model or endpoint requires reindexing.**
+> The manifest binds those settings to the stored vectors and refuses to serve
+> them if they no longer match. Re-run `finsight ingest`. Also rebuild if the model
+> behind an unchanged alias is replaced; aliases are not immutable model revisions.
 
 Index rebuilds publish a new immutable generation atomically, and running MCP
-servers refresh on the next search. Existing version 1 indexes need a one-time
+servers refresh on the next search. Existing version 1 or 2 indexes need a one-time
 `finsight ingest`. Previous generations remain on disk to protect active readers;
 automatic cleanup is not yet implemented.
 
@@ -124,11 +158,35 @@ uv run python -m finsight.mcp.server          # stdio
 uv run python -m finsight.mcp.server --http   # streamable-http on :8000
 ```
 
+The HTTP transport is a local demo without application authentication, per-user
+isolation or rate limits. Public repository availability does not make this a
+publicly deployable API; remote service deployment needs those controls first.
+
 ## Evaluation
 
-`uv run finsight evaluate` runs the golden set in `data/golden/golden.json`.
+`uv run finsight evaluate --output reports/baseline.json` runs the golden set in
+`data/golden/golden.json` and saves a versioned JSON report. `--output` is optional;
+the summary is always printed. Reports include per-case answers, scores, sanitized
+error types and scoring counts, plus model/configuration, golden-set and index
+provenance. Credentials and raw endpoint URLs are excluded; questions and answers
+still contain corpus material. The `reports/` directory is ignored by Git.
 
-Retrieval metrics are **rank-aware** and computed over answerable cases only:
+Malformed golden cases are rejected before model setup. Agent and judge failures
+are isolated so later cases still run; operational failures produce exit code 1
+after the report is saved. Malformed judge verdicts are unscored and counted as
+metric errors. A zero exit code alone is not a quality pass: inspect scoring
+coverage and errors as well as the averages. Observed index or golden-set changes
+during a run are flagged in the report; rerun against unchanged inputs for a
+comparison.
+
+Each golden case requires a nonempty `question`. Optional `id` values must be unique
+(otherwise `case-N` is assigned), `answerable` must be a JSON boolean, and
+`expected_doc_ids` must be a list of unique document IDs. Negative cases use
+`"answerable": false` with no expected documents. `ground_truth` supplies the
+reference answer for correctness scoring.
+
+Retrieval metrics are **rank-aware** and computed over successful answerable cases
+with nonempty expected-document labels. Cases without labels remain unscored:
 
 - `recall_at_k` — fraction of expected documents in the top k.
 - `mrr` — reciprocal rank of the first relevant document.
@@ -148,9 +206,15 @@ Answer metrics:
   cases received a usable abstention verdict versus an unparseable verdict.
   Unscored cases are excluded from the rate; it is `null` when none were scored.
 
+`n_agent_errors` and `n_operational_failures` expose infrastructure failures;
+`n_retrieval_scored`, `n_grounding_scored`, `n_faithfulness_scored`, and
+`n_correctness_scored` expose the denominators behind each metric. Failed agent
+cases are unscored, so high averages with poor coverage do not demonstrate quality.
+
 > **Judge bias.** By default the judge is the answering model, which is self-grading.
 > The summary prints a caveat when that is the case. Set `FINSIGHT_JUDGE_MODEL` (and
-> optionally `FINSIGHT_JUDGE_PROVIDER`) to a different family for an honest score.
+> optionally `FINSIGHT_JUDGE_PROVIDER`) to a different family to reduce that bias.
+> Independent judges can still be wrong; manually inspect a sample of verdicts.
 
 ## Project layout
 
@@ -188,8 +252,16 @@ runtime surprise.
   are checked against that exact subset. Character limits are not token limits.
 - **Deterministic grounding check.** Citation markers are validated mechanically; that
   a claim is *supported* by the chunk it cites is not verified.
+- **Heuristic PII redaction.** Phone labels and explicit `+65` prefixes are recognized;
+  bare eight-digit amounts are preserved. This is not a complete privacy filter.
+- **Local storage and full rebuilds.** No incremental updates or generation cleanup;
+  the registry and BM25 index are loaded into memory. Failed builds may leave
+  unpublished collections on disk while preserving the working index.
+- **Local service boundary.** No authentication, tenant isolation or resource quotas.
+- **Limited telemetry.** Command timing is available; per-node traces, token usage
+  and cost budgets are not implemented.
 
 ## Docs
 
 - [`docs/architecture.md`](docs/architecture.md) — design decisions and rationale.
-- [`docs/learning-plan.md`](docs/learning-plan.md) — learning & refinement roadmap.
+- [`docs/learning-plan.md`](docs/learning-plan.md) — readiness, evaluation procedure and roadmap.

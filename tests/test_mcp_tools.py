@@ -119,3 +119,29 @@ def test_server_tools_are_registered():
 
     names = {tool.name for tool in asyncio.run(mcp.list_tools())}
     assert {"search_documents", "list_documents", "get_document"} <= names
+
+
+@pytest.mark.parametrize("query,top_k", [
+    ("", None), ("  \t ", None), ("x" * 2001, None),
+    ("valid", 0), ("valid", -1), ("valid", True), ("valid", 1.5),
+])
+def test_invalid_search_inputs_fail_before_retrieval(query, top_k):
+    retriever = FakeRetriever()
+    with pytest.raises(ValueError):
+        tools.search_documents(cast(HybridRetriever, retriever), query, top_k)
+    assert retriever.queries == []
+
+
+def test_search_normalizes_query_and_keeps_configured_default():
+    retriever = FakeRetriever()
+    tools.search_documents(cast(HybridRetriever, retriever), "  founding year  ")
+    assert retriever.queries == [("founding year", None)]
+
+
+def test_server_omitted_top_k_preserves_retriever_default(monkeypatch):
+    from finsight.mcp import server
+
+    retriever = FakeRetriever()
+    monkeypatch.setattr(server, "_get_retriever", lambda: retriever)
+    server.search_documents("query")
+    assert retriever.queries == [("query", None)]

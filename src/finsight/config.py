@@ -18,7 +18,7 @@ valid embedding provider.
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LLMProvider = Literal["ollama", "openai", "anthropic", "openai_compatible"]
@@ -43,9 +43,9 @@ class Settings(BaseSettings):
     llm_model: str = "qwen3:8b"
     llm_base_url: str | None = None
     llm_api_key: str | None = None
-    llm_temperature: float = 0.0
-    llm_timeout_s: float = 60.0
-    llm_max_retries: int = 3
+    llm_temperature: float = Field(default=0.0, allow_inf_nan=False)
+    llm_timeout_s: float = Field(default=60.0, gt=0, allow_inf_nan=False)
+    llm_max_retries: int = Field(default=3, ge=0)
     # Kept for backwards compatibility with the original Ollama-only config.
     ollama_base_url: str = "http://localhost:11434"
 
@@ -66,14 +66,14 @@ class Settings(BaseSettings):
     judge_api_key: str | None = None
 
     # --- RAG knobs ---
-    chunk_size: int = 600
-    chunk_overlap: int = 100
-    retrieval_top_k: int = 4
-    retrieval_candidates: int = 8  # candidates per method before fusion
+    chunk_size: int = Field(default=600, gt=0)
+    chunk_overlap: int = Field(default=100, ge=0)
+    retrieval_top_k: int = Field(default=4, gt=0)
+    retrieval_candidates: int = Field(default=8, gt=0)  # candidates per method before fusion
     collection_name: str = "finsight"
     # Upper bound on the rendered context block, so a large top_k cannot blow
     # past the model's window silently.
-    context_max_chars: int = 12_000
+    context_max_chars: int = Field(default=12_000, gt=0)
 
     # --- Paths (relative to the project root; run commands from there) ---
     data_dir: Path = Path("data")
@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     golden_file: Path = Path("data/golden/golden.json")
 
     # --- Agent ---
-    max_retrieval_attempts: int = 2
+    max_retrieval_attempts: int = Field(default=2, ge=0)
     # Re-query when an answer cites nothing, instead of shipping it silently.
     enforce_grounding: bool = True
 
@@ -93,8 +93,23 @@ class Settings(BaseSettings):
     # MCP host share one retrieval contract.
     use_mcp_tools: bool = True
 
+    @field_validator(
+        "llm_max_retries", "embed_max_retries", "max_retrieval_attempts",
+        "chunk_size", "chunk_overlap", "retrieval_top_k", "retrieval_candidates",
+        "context_max_chars", mode="before",
+    )
+    @classmethod
+    def _reject_boolean_counts(cls, value: object) -> object:
+        # Keep numeric environment strings supported while rejecting Python's
+        # bool-as-int coercion for programmatic settings.
+        if isinstance(value, bool):
+            raise ValueError("Counts must be integers, not booleans")
+        return value
+
     @model_validator(mode="after")
     def _check_provider_config(self) -> "Settings":
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size")
         if self.llm_provider == "openai_compatible" and not self.llm_base_url:
             raise ValueError(
                 "llm_base_url is required when llm_provider='openai_compatible'"
@@ -148,7 +163,13 @@ class Settings(BaseSettings):
     @property
     def judge_is_same_model(self) -> bool:
         """True when the judge is the answering model (self-grading bias)."""
-        return self.judge_model is None or self.judge_model == self.llm_model
+        provider, model, base_url, _ = self.resolved_judge()
+        return (
+            provider == self.llm_provider
+            and model == self.llm_model
+            and (base_url or "").rstrip("/")
+            == (self.resolved_llm_base_url() or "").rstrip("/")
+        )
 
 
 def get_settings() -> Settings:

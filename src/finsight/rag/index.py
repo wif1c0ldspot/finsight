@@ -2,7 +2,7 @@
 
 A rebuild creates fresh artefacts and replaces only the manifest once complete.
 Each reader resolves that manifest once, so concurrent ingestion cannot mix
-old provenance with new vectors. Version 1 indexes require an explicit rebuild.
+old provenance with new vectors. Earlier manifest versions require a rebuild.
 """
 
 from __future__ import annotations
@@ -15,11 +15,12 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlsplit, urlunsplit
 
 from finsight.rag.models import Chunk
 
 #: Bump when the on-disk layout changes incompatibly.
-MANIFEST_VERSION = 2
+MANIFEST_VERSION = 3
 
 MANIFEST_NAME = "manifest.json"
 CHUNKS_NAME = "chunks.json"
@@ -47,6 +48,7 @@ class IndexManifest:
     generation: str
     vector_collection: str
     content_hash: str
+    embed_endpoint_hash: str
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -60,6 +62,7 @@ class IndexManifest:
             "generation": self.generation,
             "vector_collection": self.vector_collection,
             "content_hash": self.content_hash,
+            "embed_endpoint_hash": self.embed_endpoint_hash,
         }
 
     @classmethod
@@ -76,6 +79,7 @@ class IndexManifest:
                 generation=str(data["generation"]),
                 vector_collection=str(data["vector_collection"]),
                 content_hash=str(data["content_hash"]),
+                embed_endpoint_hash=str(data["embed_endpoint_hash"]),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise IndexIntegrityError(
@@ -104,6 +108,16 @@ def content_hash(chunks: list[Chunk]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _endpoint_hash(base_url: str | None) -> str:
+    """Bind the embedding route without persisting credential-bearing URLs."""
+    if base_url is None:
+        normalized = ""
+    else:
+        parts = urlsplit(base_url.strip())
+        normalized = urlunsplit(parts._replace(path=parts.path.rstrip("/")))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def write_manifest(
     index_dir: Path,
     chunks: list[Chunk],
@@ -113,6 +127,7 @@ def write_manifest(
     embed_model: str,
     generation: str = "",
     vector_collection: str | None = None,
+    embed_base_url: str | None = None,
 ) -> None:
     manifest = IndexManifest(
         version=MANIFEST_VERSION,
@@ -125,6 +140,7 @@ def write_manifest(
         generation=generation,
         vector_collection=vector_collection or collection,
         content_hash=content_hash(chunks),
+        embed_endpoint_hash=_endpoint_hash(embed_base_url),
     )
     index_dir.mkdir(parents=True, exist_ok=True)
     temporary = index_dir / f".manifest-{uuid.uuid4().hex}.tmp"
@@ -152,7 +168,7 @@ def read_manifest(index_dir: Path) -> IndexManifest:
         ) from exc
     if not isinstance(raw, dict):
         raise IndexIntegrityError("Index manifest must be a JSON object.")
-    if raw.get("version") == 1 and "chunk_count" in raw:
+    if raw.get("version") in (1, 2) and "chunk_count" in raw:
         raise IndexIntegrityError("Legacy index needs rebuilding. Re-run: finsight ingest")
     return IndexManifest.from_json(raw)
 
@@ -164,6 +180,7 @@ def validate_manifest(
     collection: str,
     embed_provider: str,
     embed_model: str,
+    embed_base_url: str | None = None,
 ) -> None:
     """Raise :class:`IndexIntegrityError` if the manifest contradicts reality.
 
@@ -184,6 +201,8 @@ def validate_manifest(
         problems.append("manifest chunk ids do not match the chunk registry")
     if manifest.content_hash != content_hash(chunks):
         problems.append("manifest content hash does not match the chunk registry")
+    if manifest.embed_endpoint_hash != _endpoint_hash(embed_base_url):
+        problems.append("embedding endpoint changed; stored vectors are not comparable")
     if manifest.collection != collection:
         problems.append(
             f"index built against collection {manifest.collection!r}, settings say {collection!r}"

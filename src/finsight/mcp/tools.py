@@ -24,6 +24,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from finsight.guardrails.validation import validate_query
 from finsight.rag.ingest import load_documents
 from finsight.rag.models import Chunk, RetrievedChunk
 from finsight.rag.retrieve import HybridRetriever
@@ -67,11 +68,22 @@ def from_payload(payload: dict[str, Any]) -> RetrievedChunk:
     )
 
 
+def validate_search_request(query: str, top_k: int | None = None) -> str:
+    """Validate shared in-process/transport inputs before opening an index."""
+    if not isinstance(query, str):
+        raise ValueError("Query must be a string.")
+    cleaned = validate_query(query)
+    if top_k is not None and (type(top_k) is not int or top_k <= 0):
+        raise ValueError("top_k must be a positive integer.")
+    return cleaned
+
+
 def search_documents(
     retriever: HybridRetriever, query: str, top_k: int | None = None
 ) -> list[dict[str, Any]]:
     """Hybrid (vector + BM25) search over the indexed corpus."""
-    return [to_payload(result) for result in retriever.retrieve(query, top_k=top_k)]
+    cleaned = validate_search_request(query, top_k)
+    return [to_payload(result) for result in retriever.retrieve(cleaned, top_k=top_k)]
 
 
 def list_documents(corpus_dir: Path) -> list[dict[str, str]]:

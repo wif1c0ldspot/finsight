@@ -9,16 +9,17 @@ Run standalone via stdio (default for MCP hosts), or HTTP:
 """
 
 import sys
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
+from pydantic import Field
 
 from finsight.config import get_settings
 from finsight.mcp import tools
 from finsight.rag.index import read_manifest
 from finsight.rag.retrieve import HybridRetriever
 
-mcp = FastMCP("finsight")
+mcp = FastMCP("finsight", strict_input_validation=True)
 
 _retriever: HybridRetriever | None = None
 
@@ -33,9 +34,12 @@ def _get_retriever() -> HybridRetriever:
 
 
 @mcp.tool()
-def search_documents(query: str, top_k: int = 4) -> list[dict[str, Any]]:
+def search_documents(
+    query: str, top_k: Annotated[int | None, Field(strict=True, gt=0)] = None,
+) -> list[dict[str, Any]]:
     """Hybrid (vector + BM25) search over the indexed financial corpus."""
-    return tools.search_documents(_get_retriever(), query, top_k=top_k)
+    cleaned = tools.validate_search_request(query, top_k)
+    return tools.search_documents(_get_retriever(), cleaned, top_k=top_k)
 
 
 @mcp.tool()

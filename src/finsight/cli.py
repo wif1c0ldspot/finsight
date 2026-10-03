@@ -8,7 +8,8 @@ produces one legible line naming the likely cause and the check to run.
 from __future__ import annotations
 
 import json
-from typing import Any
+from pathlib import Path
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -16,7 +17,12 @@ from rich.panel import Panel
 from rich.table import Table
 
 from finsight.config import Settings, get_settings
-from finsight.eval.harness import run_eval, summarize
+from finsight.eval.harness import (
+    evaluation_provenance,
+    run_eval,
+    summarize,
+    write_evaluation_report,
+)
 from finsight.graph.builder import build_agent
 from finsight.guardrails.validation import (
     GroundingAssessment,
@@ -235,19 +241,30 @@ def ask(question: str) -> None:
 
 
 @app.command()
-def evaluate() -> None:
-    """Run the golden-set evaluation and print aggregate metrics."""
+def evaluate(
+    output: Annotated[Path | None, typer.Option(help="Save a JSON evaluation report.")] = None,
+) -> None:
+    """Run the golden-set evaluation; preserve case failures in an optional report."""
     try:
         settings = get_settings()
+        before = evaluation_provenance(settings) if output is not None else None
         metrics = MetricsCollector()
         with timed(metrics, "eval"):
             results = run_eval(settings)
         summary = summarize(results, judge_is_same_model=settings.judge_is_same_model)
+        if output is not None and before is not None:
+            write_evaluation_report(
+                output, results, summary, before, evaluation_provenance(settings)
+            )
+            console.print(f"Evaluation report saved: {output}", markup=False)
     except Exception as exc:
-        _fail(exc)
-        return
+        # Provider/validation exception messages may contain credentials or input data.
+        console.print(f"Evaluation failed ({type(exc).__name__}).", markup=False)
+        raise typer.Exit(code=1) from None
     console.print_json(json.dumps(summary, indent=2))
     console.print(metrics.summary())
+    if summary.get("n_operational_failures", 0):
+        raise typer.Exit(code=1)
 
 
 @app.command()

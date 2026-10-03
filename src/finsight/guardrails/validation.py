@@ -18,7 +18,17 @@ from finsight.rag.models import RetrievedChunk
 # Illustrative patterns — tune per domain. Order matters (email before phone).
 _PII_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b"), "[EMAIL]"),
-    (re.compile(r"\b(?:\+?65[-\s]?)?[89]\d{7}\b"), "[PHONE]"),
+    # Bare eight-digit values can be financial amounts. Require a phone label
+    # or an explicit international prefix rather than corrupting those values.
+    (
+        re.compile(
+            r"(\b(?:call|phone|mobile|tel(?:ephone)?|contact)\b"
+            r"(?:\s+(?:number|no\.?))?[\s:]*)(?:\+?65[-\s]?)?[89]\d{7}\b",
+            re.IGNORECASE,
+        ),
+        r"\1[PHONE]",
+    ),
+    (re.compile(r"(?<!\w)\+65[-\s]?[89]\d{7}\b"), "[PHONE]"),
     (re.compile(r"\b[STFG]\d{7}[A-Z]\b"), "[NRIC]"),
     (re.compile(r"\b\d{4}[-\s]\d{4}[-\s]\d{4}[-\s]\d{4}\b"), "[CARD]"),
 ]
@@ -36,6 +46,8 @@ def redact_pii(text: str) -> str:
 
 def validate_query(text: str) -> str:
     """Validate and normalise a user query. Raises ValueError on bad input."""
+    if not isinstance(text, str):
+        raise ValueError("Query must be a string.")
     cleaned = text.strip()
     if not cleaned:
         raise ValueError("Query is empty.")

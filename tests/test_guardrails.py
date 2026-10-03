@@ -29,6 +29,24 @@ def test_redact_pii_phone():
     assert "[PHONE]" in redact_pii("Call 91234567 now")
 
 
+@pytest.mark.parametrize("text", ["Revenue was $91234567 [1].", "Volume was 81234567 units."])
+def test_redaction_preserves_financial_numbers(text):
+    assert redact_pii(text) == text
+
+
+@pytest.mark.parametrize("text", ["Phone: 91234567", "Mobile number 81234567", "+65 91234567"])
+def test_redaction_handles_labelled_and_international_phones(text):
+    assert "91234567" not in redact_pii(text)
+    assert "81234567" not in redact_pii(text)
+    assert "[PHONE]" in redact_pii(text)
+
+
+@pytest.mark.parametrize("value", [None, 42, [], {}])
+def test_validate_query_rejects_nontext(value):
+    with pytest.raises(ValueError, match="string"):
+        validate_query(value)
+
+
 def test_redact_pii_nric():
     assert "[NRIC]" in redact_pii("My NRIC is S1234567D")
 
